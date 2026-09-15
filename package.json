@@ -1,0 +1,20 @@
+{
+  "name": "marzipano-studio",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "marzipano": "^0.10.2",
+    "three": "^0.179.1",
+    "vite": "^7.1.3"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

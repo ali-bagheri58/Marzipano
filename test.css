@@ -1,0 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;600;700&display=swap');
+
+:root {
+  font-family: 'Space Grotesk', sans-serif;
+  color: #f4f5ef;
+  background: #101416;
+  --acid: #d8fa5a;
+  --muted: #98a39c;
+  --line: rgba(244, 245, 239, .13);
+}
+
+* { box-sizing: border-box; }
+html, body { min-width: 320px; min-height: 100%; margin: 0; }
+body { min-height: 100vh; background: radial-gradient(circle at 75% 35%, #2a3430 0, #101416 55%); }
+button { font: inherit; cursor: pointer; }
+.test-shell { width: min(1180px, 100%); min-height: 100vh; margin: auto; padding: 28px; }
+.test-header { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding-bottom: 22px; }
+.eyebrow { margin: 0 0 8px; color: var(--acid); font: 500 10px 'DM Mono', monospace; letter-spacing: .12em; text-transform: uppercase; }
+h1 { margin: 0; font-size: clamp(24px, 4vw, 42px); letter-spacing: -.04em; }
+#open-image { padding: 12px 18px; border: 1px solid var(--acid); background: var(--acid); color: #141810; font-weight: 700; }
+#open-image:hover { background: #efffa9; }
+.viewer-panel { position: relative; min-height: min(72vh, 720px); overflow: hidden; border: 1px solid var(--line); background: #171e20; }
+#viewer { position: absolute; inset: 0; }
+#viewer canvas { display: block; width: 100%; height: 100%; }
+#empty-state { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%, -50%); color: var(--muted); font-size: 14px; pointer-events: none; }
+.viewer-hint { position: absolute; right: 18px; bottom: 16px; margin: 0; padding: 9px 12px; border-right: 2px solid var(--acid); background: rgba(16, 20, 22, .78); color: var(--muted); font-size: 12px; pointer-events: none; }
+.image-name { margin: 12px 0 0; color: var(--muted); font: 12px 'DM Mono', monospace; direction: ltr; text-align: left; }
+@media (max-width: 600px) {
+  .test-shell { padding: 18px; }
+  .test-header { align-items: stretch; flex-direction: column; }
+  #open-image { align-self: flex-start; }
+  .viewer-panel { min-height: 65vh; }
+}

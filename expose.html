@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0c1012" />
+    <title>Expose</title>
+    <link rel="stylesheet" href="/expose.css" />
+  </head>
+  <body>
+    <header class="expose-header">
+      <h1>Expose</h1>
+
+      <div class="header-actions">
+        <button id="open-image" type="button" class="open-button">Choose files</button>
+        <button id="play-slideshow" type="button" class="play-button">Play</button>
+      </div>
+
+      <input id="image-input" type="file" accept="image/*" multiple hidden />
+    </header>
+
+    <main id="expose" class="expose-grid" aria-label="Expose gallery"></main>
+
+    <script type="module" src="/expose.js"></script>
+  </body>
+</html>
