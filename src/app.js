@@ -429,7 +429,7 @@ async function loadMarzipanoExportZip(file, targetIndex = 0, targetKey = null) {
 
     const keyedTarget = targetKey ? exportTargets.find((target) => target.key === targetKey) : null;
     const firstTarget = keyedTarget || (Array.isArray(exportTargets) && exportTargets.length ? exportTargets[Math.min(targetIndex, exportTargets.length - 1)] : { key: 'marzipano-export', label: file.name.replace(/\.[^/.]+$/, ''), root: './tiles/marzipano-export', previewUrl: './tiles/marzipano-export/preview.jpg', geometryType: 'cube', yaw: 0, pitch: 0, fov: Math.PI / 2, hotspots: [] });
-    if (exportTargets.length > 1) addZipSceneItems(file, exportTargets);
+    if (exportTargets.length) addZipSceneItems(file, exportTargets);
     currentZipSceneKey = firstTarget.key;
     const panoramaKey = String(firstTarget.key || file.name.replace(/\.[^/.]+$/, '') || 'marzipano-export');
     const tileRoot = normalizeRelativePath(firstTarget.root || `./tiles/${panoramaKey}`).replace(/^\.\//, '').replace(/\/$/, '');
@@ -1154,13 +1154,27 @@ function getScenePreviewUrl(key) {
 }
 
 function createTargetPreviewViewer(key, host, image) {
-  if (!currentZipPreviewUrls.has(key) && !Object.keys(currentZipPreviewTileMap).some((path) => path.startsWith(`${key}/`))) {
+  const localFiles = panoramaFileGroups.get(key) || [];
+  const localPreviewFile = localFiles.find((file) => isPreviewFile(file));
+  const localPreviewUrl = localPreviewFile ? URL.createObjectURL(localPreviewFile) : '';
+  const localTileMap = new Map();
+  localFiles.forEach((file) => {
+    const relative = normalizeRelativePath(file.webkitRelativePath || file.relativePath || file.name);
+    const segments = relative.split('/').filter(Boolean);
+    const levelIndex = segments.findIndex((segment) => /^\d+$/.test(segment) || /^[bdflru]$/i.test(segment));
+    if (levelIndex <= 0) return;
+    const suffix = segments.slice(levelIndex).join('/');
+    if (/\.(jpe?g|png)$/i.test(suffix)) localTileMap.set(suffix, URL.createObjectURL(file));
+  });
+  const hasZipTiles = currentZipPreviewUrls.has(key) || Object.keys(currentZipPreviewTileMap).some((path) => path.startsWith(`${key}/`));
+  const hasLocalTiles = localTileMap.size > 0;
+  if (!hasZipTiles && !hasLocalTiles) {
     image.src = getScenePreviewUrl(key);
     image.style.display = 'block';
     return null;
   }
   image.style.display = 'none';
-  const previewUrl = currentZipPreviewUrls.get(key) || getScenePreviewUrl(key);
+  const previewUrl = currentZipPreviewUrls.get(key) || localPreviewUrl || getScenePreviewUrl(key);
   const viewer = new Marzipano.Viewer(host, { stage: { progressive: true } });
   const source = new Marzipano.ImageUrlSource((tile) => {
     const level = Number(tile.z || 0);
@@ -1171,9 +1185,11 @@ function createTargetPreviewViewer(key, host, image) {
       const faceIndex = 'bdflru'.indexOf(face);
       if (faceIndex >= 0) return { url: previewUrl, rect: { x: 0, y: faceIndex / 6, width: 1, height: 1 / 6 } };
     }
-    const paths = [`${key}/${level}/${face}/${row}/${column}.jpg`, `${key}/${level}/${face}/${row}/${column}.png`];
-    const path = paths.find((candidate) => currentZipPreviewTileMap[candidate]);
-    return { url: path ? currentZipPreviewTileMap[path] : previewUrl };
+    const paths = hasLocalTiles
+      ? [`${level}/${face}/${row}/${column}.jpg`, `${level}/${face}/${row}/${column}.png`]
+      : [`${key}/${level}/${face}/${row}/${column}.jpg`, `${key}/${level}/${face}/${row}/${column}.png`];
+    const path = paths.find((candidate) => localTileMap.has(candidate) || currentZipPreviewTileMap[candidate]);
+    return { url: path ? (localTileMap.get(path) || currentZipPreviewTileMap[path]) : previewUrl };
   });
   const view = new Marzipano.RectilinearView({ yaw: 0, pitch: 0, fov: 120 * Math.PI / 180 });
   const scene = viewer.createScene({ source, geometry: new Marzipano.CubeGeometry([{ tileSize: 256, size: 256, fallbackOnly: true }, { tileSize: 512, size: 512 }, { tileSize: 512, size: 1024 }]), view, pinFirstLevel: true });

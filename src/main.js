@@ -222,7 +222,7 @@ async function loadMarzipanoExportZip(file, targetIndex = 0, targetKey = null) {
 
     const keyedTarget = targetKey ? exportTargets.find((target) => target.key === targetKey) : null;
     const firstTarget = keyedTarget || (Array.isArray(exportTargets) && exportTargets.length ? exportTargets[Math.min(targetIndex, exportTargets.length - 1)] : { key: 'marzipano-export', label: file.name.replace(/\.[^/.]+$/, ''), root: './tiles/marzipano-export', previewUrl: './tiles/marzipano-export/preview.jpg', geometryType: 'cube', yaw: 0, pitch: 0, fov: Math.PI / 2, hotspots: [] });
-    if (exportTargets.length > 1) addZipSceneItems(file, exportTargets);
+    if (exportTargets.length) addZipSceneItems(file, exportTargets);
     currentZipSceneKey = firstTarget.key;
     const panoramaKey = String(firstTarget.key || file.name.replace(/\.[^/.]+$/, '') || 'marzipano-export');
     const tileRoot = normalizeRelativePath(firstTarget.root || `./tiles/${panoramaKey}`).replace(/^\.\//, '').replace(/\/$/, '');
