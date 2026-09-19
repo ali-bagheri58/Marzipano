@@ -1,3 +1,93 @@
+// The local worker URL is resolved by Vite at build time and bundled as a
+// separate chunk — no external network request needed.
+const LOCAL_EQUIRECT_WORKER_URL = new URL('./equirect.worker.js', import.meta.url);
+
+function buildEquirectLevels(faceSize) {
+  const levels = [];
+  let exponent = 0;
+  const baseSize = 512;
+
+  while (baseSize * (2 ** exponent) <= faceSize) {
+    levels.push({ tileSize: 512, size: baseSize * (2 ** exponent) });
+    exponent += 1;
+  }
+
+  if (!levels.length) levels.push({ tileSize: 512, size: 512 });
+  const nextSize = baseSize * (2 ** exponent);
+  if (levels[levels.length - 1].size * 1.25 < faceSize) levels.push({ tileSize: 512, size: nextSize });
+  return levels;
+}
+
+export async function generateOfficialEquirectTiles(file, { onProgress } = {}) {
+  if (!(file instanceof File)) throw new Error('An equirectangular image file is required');
+
+  const image = await createImageBitmap(file);
+  const width = image.width;
+  const height = image.height;
+  image.close();
+
+  // Accept images whose shorter dimension × 2 ≈ longer dimension (within 2%).
+  // Pure 2:1 check rejected perfectly valid 360° photos from certain cameras.
+  const ratio = width / height;
+  if (ratio < 1.96 || ratio > 2.04) {
+    throw new Error(
+      `Equirectangular images should have a 2:1 aspect ratio (got ${width}×${height}, ratio ${ratio.toFixed(3)})`
+    );
+  }
+
+  // Normalise dimensions to a strict 2:1 so the worker doesn't have to worry.
+  const normW = width;
+  const normH = Math.round(width / 2);
+
+  const faceSize = Math.ceil(normW / 4);
+  const levels = buildEquirectLevels(faceSize);
+
+  const worker = new Worker(LOCAL_EQUIRECT_WORKER_URL, { type: 'module' });
+
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const tiles = [];
+      worker.addEventListener('message', (event) => {
+        const message = event.data || {};
+        if (message.msg === 'tile') {
+          tiles.push({ level: message.level, face: message.face, y: message.v, x: message.h, data: message.tileArray });
+          // Per-tile progress: map 0→totalTiles to 20→90%
+          if (typeof onProgress === 'function' && message.totalTiles > 0) {
+            const pct = 20 + Math.round((message.completedTiles / message.totalTiles) * 70);
+            onProgress(pct);
+          }
+        } else if (message.msg === 'progress') {
+          // completedLevels / totalLevels → map to 40–90% range (legacy fallback)
+          if (typeof onProgress === 'function') {
+            const pct = 40 + Math.round((message.completedLevels / message.totalLevels) * 50);
+            onProgress(pct);
+          }
+        } else if (message.msg === 'done') {
+          resolve({ tiles, preview: message.cubeMapPreviewArray || null });
+        } else if (message.msg === 'error') {
+          reject(new Error(`Equirect worker error: ${message.error}`));
+        }
+      });
+      worker.addEventListener('messageerror', () => reject(new Error('Equirect worker returned an uncloneable message')));
+      worker.addEventListener('error', (event) => {
+        const details = event.error?.message || event.message || 'unknown worker error';
+        reject(new Error(`Equirect worker failed: ${details}`));
+      });
+      // Pass normalised dimensions so the worker renders into a clean 2:1 canvas.
+      worker.postMessage({
+        fileData: { file, width: normW, height: normH },
+        levels,
+        cubeMapPreviewSize: 256,
+        cubeMapPreviewFaceOrder: 'bdflru',
+      });
+    });
+
+    return { faceSize, levels, ...result };
+  } finally {
+    worker.terminate();
+  }
+}
+
 export function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -31,40 +121,54 @@ export function splitCubePreviewFaces(dataUrl) {
 }
 
 export function buildMarzipanoDataJs(exportTargets = []) {
-  const scenes = exportTargets.map((target) => ({
-    id: target.key,
-    name: target.label || target.key,
-    levels: [
-      { tileSize: 256, size: 256, fallbackOnly: true },
-      { tileSize: 512, size: 512 },
-      { tileSize: 512, size: 1024 },
-      { tileSize: 512, size: 2048 },
-      { tileSize: 512, size: 4096 }
-    ],
-    faceSize: 2976,
-    initialViewParameters: target.initialViewParameters || {
-      pitch: Number(target.pitch) || 0,
-      yaw: Number(target.yaw) || 0,
-      fov: Number(target.fov) || Math.PI / 2
-    },
-    sceneSound: target.sceneSound || null,
-    sceneVideo: target.sceneVideo || null,
-    linkHotspots: (target.hotspots || []).map((hotspot) => ({
-      yaw: hotspot.yaw || 0,
-      pitch: hotspot.pitch || 0,
-      rotation: hotspot.rotation || 0,
-      target: hotspot.target || target.key,
-      text: hotspot.label || 'Hotspot',
-      sizePercent: Math.min(200, Math.max(50, Number(hotspot.sizePercent) || 100)),
-      targetViewParameters: {
-        yaw: Number(hotspot.targetYaw ?? hotspot.targetViewParameters?.yaw ?? 0),
-        pitch: Number(hotspot.targetPitch ?? hotspot.targetViewParameters?.pitch ?? 0),
-        fov: Number(hotspot.targetFov ?? hotspot.targetViewParameters?.fov ?? 120)
+  const scenes = exportTargets.map((target) => {
+    // Ensure the levels array always starts with a fallback level at index 0.
+    // Tiles are written with index 1, 2, ... (index 0 reserved for the preview fallback).
+    // CubeGeometry in index.js uses these levels directly, so index must match file paths.
+    let levels = target.levels;
+    if (levels && levels.length && !levels[0].fallbackOnly) {
+      levels = [{ tileSize: 256, size: 256, fallbackOnly: true }, ...levels];
+    }
+    if (!levels) {
+      levels = [
+        { tileSize: 256, size: 256, fallbackOnly: true },
+        { tileSize: 512, size: 512 },
+        { tileSize: 512, size: 1024 },
+        { tileSize: 512, size: 2048 },
+        { tileSize: 512, size: 4096 }
+      ];
+    }
+    return {
+      id: target.key,
+      name: target.label || target.key,
+      geometryType: target.geometryType || 'cube',
+      equirectUrl: target.geometryType === 'equirect' ? (target.previewUrl || `./tiles/${target.key}/preview.jpg`) : null,
+      levels,
+      faceSize: target.faceSize || 2976,
+      initialViewParameters: target.initialViewParameters || {
+        pitch: Number(target.pitch) || 0,
+        yaw: Number(target.yaw) || 0,
+        fov: Number(target.fov) || Math.PI / 2
       },
-      sound: hotspot.sound || null
-    })),
-    infoHotspots: []
-  }));
+      sceneSound: target.sceneSound || null,
+      sceneVideo: target.sceneVideo || null,
+      linkHotspots: (target.hotspots || []).map((hotspot) => ({
+        yaw: hotspot.yaw || 0,
+        pitch: hotspot.pitch || 0,
+        rotation: hotspot.rotation || 0,
+        target: hotspot.target || target.key,
+        text: hotspot.label || 'Hotspot',
+        sizePercent: Math.min(200, Math.max(50, Number(hotspot.sizePercent) || 100)),
+        targetViewParameters: {
+          yaw: Number(hotspot.targetYaw ?? hotspot.targetViewParameters?.yaw ?? 0),
+          pitch: Number(hotspot.targetPitch ?? hotspot.targetViewParameters?.pitch ?? 0),
+          fov: Number(hotspot.targetFov ?? hotspot.targetViewParameters?.fov ?? 120)
+        },
+        sound: hotspot.sound || null
+      })),
+      infoHotspots: []
+    };
+  });
 
   const projectDetails = exportTargets[0]?.projectDetails || {};
   return `var APP_DATA = ${JSON.stringify({ scenes, projectDetails, name: 'Project Title', settings: { mouseViewMode: 'drag', autorotateEnabled: true, fullscreenButton: false, viewControlButtons: false } }, null, 2)};`;

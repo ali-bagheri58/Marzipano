@@ -18,7 +18,8 @@ import {
   buildTemplatePreviewScript,
   buildPreviewAssetMap,
   buildExportTileUrlMap,
-  addBundledMarzipanoTemplate
+  addBundledMarzipanoTemplate,
+  generateOfficialEquirectTiles
 } from './export.js';
 
 const app = document.querySelector('#app');
@@ -28,11 +29,7 @@ app.innerHTML = `
       <div class="top-actions">
         <label class="header-action" id="header-file-trigger">
           <input id="file-input" type="file" accept=".glb,.gltf,.obj,.fbx,.jpg,.jpeg,.png,.zip" multiple />
-          <span>Choose a file</span>
-        </label>
-        <label class="header-action" id="header-folder-trigger">
-          <input id="folder-input" type="file" webkitdirectory directory multiple />
-          <span>Choose a tiles folder</span>
+          <span>Open project</span>
         </label>
         <button id="add-hotspot-btn" class="badge hotspot-btn" style="display: none;">+ Hotspot</button>
         <button id="project-details-btn" class="badge" type="button">Project details</button>
@@ -551,7 +548,26 @@ async function loadPanorama(file) {
 
     showProgress('Loading panorama...', 20);
 
-    const localRoot = await resolveLocalMarzipanoTiles(file);
+    const localRoot = currentMarzipanoFiles.length || isMarzipanoTileSelection(file)
+      ? await resolveLocalMarzipanoTiles(file)
+      : null;
+    const isRawEquirect = !localRoot && !currentMarzipanoFiles.length && /\.jpe?g$/i.test(file.name);
+    let generatedEquirect = officialEquirectResults.get(file) || null;
+    if (isRawEquirect && !generatedEquirect) {
+      showProgress('Processing panorama... 0%', 20);
+      generatedEquirect = await generateOfficialEquirectTiles(file, {
+        onProgress: (pct) => showProgress(`Processing panorama... ${pct}%`, pct),
+      });
+      officialEquirectResults.set(file, generatedEquirect);
+    }
+    // Track this file so all equirect scenes (not just currentFile) can be exported.
+    if (isRawEquirect) {
+      const sceneKey = getMarzipanoTileFolder(file) || file.name.replace(/\.[^/.]+$/, '');
+      equirectSourceFiles.set(sceneKey, file);
+      // Also store under the full filename (used as displayName / sceneKey in the sidebar)
+      if (file.name !== sceneKey) equirectSourceFiles.set(file.name, file);
+    }
+    if (generatedEquirect) showProgress('Loading tiled panorama...', 90);
     const tileLevels = [
       { tileSize: 256, size: 256, fallbackOnly: true },
       { tileSize: 512, size: 512 },
@@ -574,7 +590,8 @@ async function loadPanorama(file) {
     });
 
     const usesUploadedFiles = currentMarzipanoFiles.length > 0;
-    const source = usesUploadedFiles
+    const officialSource = generatedEquirect ? createOfficialEquirectSource(generatedEquirect) : null;
+    const source = officialSource?.source || (usesUploadedFiles
       ? new Marzipano.ImageUrlSource((tile) => {
           const candidates = [
             `${tile.z}/${tile.face}/${tile.y}/${tile.x}.jpg`,
@@ -591,14 +608,14 @@ async function loadPanorama(file) {
             cubeMapPreviewUrl: `${localRoot}/preview.jpg`,
             cubeMapPreviewFaceOrder: 'bdflru'
           })
-        : new Marzipano.ImageUrlSource(() => ({ url: URL.createObjectURL(file) }));
+        : new Marzipano.ImageUrlSource(() => ({ url: URL.createObjectURL(file) })));
 
-    const geometry = usesUploadedFiles || localRoot
+    const geometry = officialSource?.geometry || (usesUploadedFiles || localRoot
       ? new Marzipano.CubeGeometry(tileLevels)
       : new Marzipano.EquirectGeometry([
           { tileSize: 1024, size: 1024 },
           { tileSize: 1024, size: 2048 }
-        ]);
+        ]));
 
     const panoramaKey = getMarzipanoTileFolder(file) || file.name;
     const initialView = sceneViewSettings.get(panoramaKey) || { yaw: 0, pitch: 0 };
@@ -620,7 +637,9 @@ async function loadPanorama(file) {
 
     const displayName = (usesUploadedFiles || localRoot) ? getMarzipanoTileFolder(file) || file.name : file.name;
     document.querySelector('#scene-name').textContent = getSceneTitle(getMarzipanoTileFolder(file), displayName);
-    document.querySelector('#scene-meta').textContent = (usesUploadedFiles || localRoot) ? 'PANORAMA / LOCAL TILES' : 'PANORAMA / EQUIRECTANGULAR';
+    document.querySelector('#scene-meta').textContent = generatedEquirect
+      ? 'PANORAMA / MARZIPANO TILES'
+      : (usesUploadedFiles || localRoot) ? 'PANORAMA / LOCAL TILES' : 'PANORAMA / EQUIRECTANGULAR';
     status.textContent = '';
     showProgress('Ready', 100);
     setTimeout(() => { status.textContent = ''; }, 500);
@@ -800,9 +819,69 @@ let activePanoramaScene = null;
 let panoramaFileGroups = new Map();
 let panoramaHotspots = new Map();
 let sceneTitles = new Map();
+// Maps scene key → original File object for plain equirectangular JPGs.
+// Used at export time so all loaded scenes (not just currentFile) get tiled.
+let equirectSourceFiles = new Map();
 let currentZipSceneKey = null;
 let currentZipLinkIconUrl = '';
 let currentZipArchive = null;
+const officialEquirectResults = new WeakMap();
+
+function createOfficialEquirectSource(generated) {
+  // Build a lookup by level SIZE (not index) so we can match what the worker produced.
+  // Key format: "{levelSize}/{face}/{tileY}/{tileX}"
+  const tileMap = new Map();
+  generated.tiles.forEach((tile) => {
+    const levelSize = tile.level?.size ?? tile.level;
+    const key = `${levelSize}/${tile.face}/${tile.y}/${tile.x}`;
+    tileMap.set(key, URL.createObjectURL(new Blob([tile.data], { type: 'image/jpeg' })));
+  });
+
+  // Build a level-index → level-size map so we can translate tile.z → size at request time.
+  // The geometry levels array is: [fallback256, ...generated.levels]
+  // index 0 = fallback (size 256), index 1 = first real level, etc.
+  const geometryLevels = [
+    { tileSize: 256, size: 256, fallbackOnly: true },
+    ...generated.levels,
+  ];
+  // Map from index → size for quick lookup
+  const indexToSize = geometryLevels.map((l) => l.size);
+
+  const previewUrl = generated.preview
+    ? URL.createObjectURL(new Blob([generated.preview], { type: 'image/jpeg' }))
+    : '';
+
+  return {
+    source: new Marzipano.ImageUrlSource((tile) => {
+      // tile.z is the level INDEX in the geometry levels array.
+      const levelSize = indexToSize[Number(tile.z)] ?? null;
+
+      // Level 0 is the fallback — serve from the preview strip using rect.
+      if (Number(tile.z) === 0 && previewUrl) {
+        const faceIndex = 'bdflru'.indexOf(String(tile.face || '').toLowerCase());
+        if (faceIndex >= 0) {
+          return { url: previewUrl, rect: { x: 0, y: faceIndex / 6, width: 1, height: 1 / 6 } };
+        }
+      }
+
+      if (levelSize !== null) {
+        const key = `${levelSize}/${tile.face}/${tile.y}/${tile.x}`;
+        const url = tileMap.get(key);
+        if (url) return { url };
+      }
+
+      // Final fallback: preview strip
+      if (previewUrl) {
+        const faceIndex = 'bdflru'.indexOf(String(tile.face || '').toLowerCase());
+        if (faceIndex >= 0) {
+          return { url: previewUrl, rect: { x: 0, y: faceIndex / 6, width: 1, height: 1 / 6 } };
+        }
+      }
+      return { url: previewUrl || '' };
+    }),
+    geometry: new Marzipano.CubeGeometry(geometryLevels),
+  };
+}
 let currentZipExportTargets = [];
 let currentZipPreviewTileMap = {};
 let currentZipPreviewUrls = new Map();
@@ -882,6 +961,7 @@ function removeSceneItem(item, file, sceneKey, isZipScene) {
     sceneVideos.delete(sceneKey);
   } else {
     panoramaFileGroups.delete(sceneKey);
+    equirectSourceFiles.delete(sceneKey);
     sceneTitles.delete(sceneKey);
   }
 
@@ -976,7 +1056,10 @@ function editSceneProperties(sceneKey) {
   const updatePreviewView = () => {
     const yaw = Number(yawInput.value || 0);
     const pitch = Number(pitchInput.value || 0);
-    previewImage.style.transform = `translateX(${yaw * 18}px) translateY(${-pitch * 18}px) scale(1.15)`;
+    previewScene?.view.setParameters({ yaw, pitch, fov: 100 * Math.PI / 180 });
+    if (!previewScene) {
+      previewImage.style.transform = `translateX(${yaw * 18}px) translateY(${-pitch * 18}px) scale(1.15)`;
+    }
   };
   previewScene?.view.addEventListener('change', () => {
     const view = previewScene.view;
@@ -994,8 +1077,10 @@ function editSceneProperties(sceneKey) {
     const startYaw = Number(yawInput.value || 0);
     const startPitch = Number(pitchInput.value || 0);
     const move = (moveEvent) => {
-      yawInput.value = (startYaw + (moveEvent.clientX - startX) / rect.width * Math.PI * 2).toFixed(2);
-      pitchInput.value = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, startPitch - (moveEvent.clientY - startY) / rect.height * Math.PI)).toFixed(2);
+      const newYaw = startYaw + (moveEvent.clientX - startX) / rect.width * Math.PI * 2;
+      const newPitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, startPitch - (moveEvent.clientY - startY) / rect.height * Math.PI));
+      yawInput.value = newYaw.toFixed(2);
+      pitchInput.value = newPitch.toFixed(2);
       updatePreviewView();
     };
     const stop = () => {
@@ -1085,6 +1170,16 @@ function getSceneTitle(key, fallback) {
   return sceneTitles.get(key) || fallback || key;
 }
 
+// Looks up sceneVideos / sceneSounds by canonical key (no ext) OR full filename (with ext).
+// Needed because editSceneProperties uses displayName (with .jpg) as key,
+// but buildExportTargets iterates equirectSourceFiles using canonical key (no ext).
+function getSceneVideo(key) {
+  return sceneVideos.get(key) || sceneVideos.get(key.replace(/\.[^/.]+$/, '')) || sceneVideos.get(`${key}.jpg`) || sceneVideos.get(`${key}.jpeg`) || sceneVideos.get(`${key}.png`) || null;
+}
+function getSceneSound(key) {
+  return sceneSounds.get(key) || sceneSounds.get(key.replace(/\.[^/.]+$/, '')) || sceneSounds.get(`${key}.jpg`) || sceneSounds.get(`${key}.jpeg`) || sceneSounds.get(`${key}.png`) || null;
+}
+
 function getHotspotsForPanoramaKey(key) {
   if (!key) return [];
   const list = panoramaHotspots.get(key) || [];
@@ -1143,6 +1238,14 @@ function getHotspotTargetOptions() {
   panoramaFileGroups.forEach((files, key) => {
     if (!keys.includes(key)) keys.push(key);
   });
+  // Plain equirectangular JPGs are tracked in equirectSourceFiles (not panoramaFileGroups).
+  // Use the extension-free key (canonical scene key) so it matches sceneViewSettings etc.
+  equirectSourceFiles.forEach((file, key) => {
+    // Skip the duplicate entry that stores the full filename (e.g. "img.jpg")
+    // — only keep the canonical key without extension.
+    if (/\.[^/.]+$/.test(key)) return;
+    if (!keys.includes(key)) keys.push(key);
+  });
   return keys;
 }
 
@@ -1168,31 +1271,62 @@ function createTargetPreviewViewer(key, host, image) {
   });
   const hasZipTiles = currentZipPreviewUrls.has(key) || Object.keys(currentZipPreviewTileMap).some((path) => path.startsWith(`${key}/`));
   const hasLocalTiles = localTileMap.size > 0;
-  if (!hasZipTiles && !hasLocalTiles) {
-    image.src = getScenePreviewUrl(key);
+
+  // For plain equirect JPGs: use the already-generated tiles from officialEquirectResults.
+  const equirectSourceFile = equirectSourceFiles.get(key);
+  const generatedEquirect = equirectSourceFile ? officialEquirectResults.get(equirectSourceFile) : null;
+
+  // Also try stripping the extension — displayName may be 'img.jpg' while key stored is 'img'
+  const equirectSourceFileAlt = !equirectSourceFile
+    ? equirectSourceFiles.get(key.replace(/\.[^/.]+$/, ''))
+    : null;
+  const generatedEquirectAlt = equirectSourceFileAlt ? officialEquirectResults.get(equirectSourceFileAlt) : null;
+  const resolvedEquirect = generatedEquirect || generatedEquirectAlt;
+  const resolvedSourceFile = equirectSourceFile || equirectSourceFileAlt;
+
+  if (!hasZipTiles && !hasLocalTiles && !resolvedEquirect) {
+    // Show static preview if image not yet processed
+    const staticUrl = resolvedSourceFile ? URL.createObjectURL(resolvedSourceFile) : getScenePreviewUrl(key);
+    image.src = staticUrl;
     image.style.display = 'block';
     return null;
   }
   image.style.display = 'none';
   const previewUrl = currentZipPreviewUrls.get(key) || localPreviewUrl || getScenePreviewUrl(key);
-  const viewer = new Marzipano.Viewer(host, { stage: { progressive: true } });
-  const source = new Marzipano.ImageUrlSource((tile) => {
-    const level = Number(tile.z || 0);
-    const face = String(tile.face || '').toLowerCase();
-    const row = Number(tile.y || 0);
-    const column = Number(tile.x || 0);
-    if (level === 0 && previewUrl) {
-      const faceIndex = 'bdflru'.indexOf(face);
-      if (faceIndex >= 0) return { url: previewUrl, rect: { x: 0, y: faceIndex / 6, width: 1, height: 1 / 6 } };
-    }
-    const paths = hasLocalTiles
-      ? [`${level}/${face}/${row}/${column}.jpg`, `${level}/${face}/${row}/${column}.png`]
-      : [`${key}/${level}/${face}/${row}/${column}.jpg`, `${key}/${level}/${face}/${row}/${column}.png`];
-    const path = paths.find((candidate) => localTileMap.has(candidate) || currentZipPreviewTileMap[candidate]);
-    return { url: path ? (localTileMap.get(path) || currentZipPreviewTileMap[path]) : previewUrl };
-  });
+
+  // Build the tile source — prefer generated equirect tiles when available.
+  let source;
+  let geometry;
+  if (resolvedEquirect) {
+    const equirectSource = createOfficialEquirectSource(resolvedEquirect);
+    source = equirectSource.source;
+    geometry = equirectSource.geometry;
+  } else {
+    source = new Marzipano.ImageUrlSource((tile) => {
+      const level = Number(tile.z || 0);
+      const face = String(tile.face || '').toLowerCase();
+      const row = Number(tile.y || 0);
+      const column = Number(tile.x || 0);
+      if (level === 0 && previewUrl) {
+        const faceIndex = 'bdflru'.indexOf(face);
+        if (faceIndex >= 0) return { url: previewUrl, rect: { x: 0, y: faceIndex / 6, width: 1, height: 1 / 6 } };
+      }
+      const paths = hasLocalTiles
+        ? [`${level}/${face}/${row}/${column}.jpg`, `${level}/${face}/${row}/${column}.png`]
+        : [`${key}/${level}/${face}/${row}/${column}.jpg`, `${key}/${level}/${face}/${row}/${column}.png`];
+      const path = paths.find((candidate) => localTileMap.has(candidate) || currentZipPreviewTileMap[candidate]);
+      return { url: path ? (localTileMap.get(path) || currentZipPreviewTileMap[path]) : previewUrl };
+    });
+    geometry = new Marzipano.CubeGeometry([
+      { tileSize: 256, size: 256, fallbackOnly: true },
+      { tileSize: 512, size: 512 },
+      { tileSize: 512, size: 1024 },
+    ]);
+  }
+
   const view = new Marzipano.RectilinearView({ yaw: 0, pitch: 0, fov: 120 * Math.PI / 180 });
-  const scene = viewer.createScene({ source, geometry: new Marzipano.CubeGeometry([{ tileSize: 256, size: 256, fallbackOnly: true }, { tileSize: 512, size: 512 }, { tileSize: 512, size: 1024 }]), view, pinFirstLevel: true });
+  const viewer = new Marzipano.Viewer(host, { stage: { progressive: true } });
+  const scene = viewer.createScene({ source, geometry, view, pinFirstLevel: true });
   scene.switchTo();
   return { viewer, view };
 }
@@ -1528,7 +1662,17 @@ function buildExportTargets() {
       };
     });
     const importedKeys = new Set(importedTargets.map((target) => target.key));
+
+    // Collect added scenes from panoramaFileGroups (tile folders only).
+    // Skip plain JPG entries that are already tracked in equirectSourceFiles
+    // — those will be handled separately as addedEquirectTargets below.
     const addedTargets = [...panoramaFileGroups.entries()]
+      .filter(([key]) => {
+        // A panoramaFileGroups entry for a plain JPG has key = file.name (with extension).
+        // If its canonical key (no ext) exists in equirectSourceFiles, skip it here.
+        const canonicalKey = key.replace(/\.[^/.]+$/, '');
+        return !equirectSourceFiles.has(canonicalKey);
+      })
       .map(([key, files]) => ({
         key: importedKeys.has(key) ? `${key}-folder` : key,
         label: getSceneTitle(key, key),
@@ -1541,7 +1685,31 @@ function buildExportTargets() {
         projectDetails: projectBuildingDetails,
         hotspots: panoramaHotspots.get(key) || []
       }));
-    const targets = [...importedTargets, ...addedTargets];
+
+    // Also collect plain equirect JPGs added on top of a ZIP project.
+    // equirectSourceFiles stores canonical (no-ext) key → File.
+    const addedEquirectTargets = [];
+    equirectSourceFiles.forEach((file, key) => {
+      if (/\.[^/.]+$/.test(key)) return; // skip full-filename duplicates
+      if (importedKeys.has(key)) return; // already in ZIP
+      if (addedTargets.some((t) => t.key === key)) return; // already from panoramaFileGroups
+      const viewState = sceneViewSettings.get(key) || { yaw: 0, pitch: 0 };
+      addedEquirectTargets.push({
+        key,
+        label: getSceneTitle(key, key),
+        exportSource: 'equirect',
+        root: `./tiles/${key}`,
+        previewUrl: `./tiles/${key}/preview.jpg`,
+        geometryType: 'equirect',
+        yaw: viewState.yaw,
+        pitch: viewState.pitch,
+        initialViewParameters: { yaw: Number(viewState.yaw) || 0, pitch: Number(viewState.pitch) || 0, fov: Math.PI / 2 },
+        projectDetails: projectBuildingDetails,
+        hotspots: panoramaHotspots.get(key) || []
+      });
+    });
+
+    const targets = [...importedTargets, ...addedTargets, ...addedEquirectTargets];
     const rows = [...document.querySelectorAll('#files .file-name')];
     const orderOf = (target) => rows.findIndex((row) => target.exportSource === 'zip'
       ? row.dataset.fileName?.endsWith(`:${target.key}`)
@@ -1573,8 +1741,8 @@ function buildExportTargets() {
         pitch: Number(viewState.pitch) || 0,
         fov: Math.PI / 2
       },
-      sceneSound: sceneSounds.get(key) || null,
-      sceneVideo: sceneVideos.get(key) || null,
+      sceneSound: getSceneSound(key) || null,
+      sceneVideo: getSceneVideo(key) || null,
       projectDetails: projectBuildingDetails,
       hotspots: targetHotspots.map((hotspot) => ({
         label: hotspot.label || 'Hotspot',
@@ -1613,8 +1781,8 @@ function buildExportTargets() {
       pitch: Number(currentPanoramaViewState.pitch) || 0,
       fov: Math.PI / 2
     },
-    sceneSound: sceneSounds.get(fallbackKey) || null,
-    sceneVideo: sceneVideos.get(fallbackKey) || null,
+    sceneSound: getSceneSound(fallbackKey) || null,
+    sceneVideo: getSceneVideo(fallbackKey) || null,
     projectDetails: projectBuildingDetails,
     hotspots: fallbackEntryHotspots.map((hotspot) => ({
       label: hotspot.label || 'Hotspot',
@@ -1631,11 +1799,58 @@ function buildExportTargets() {
 
   const entryMap = new Map();
   panoramaEntries.forEach((entry) => entryMap.set(entry.key, entry));
+
+  // Add all plain equirectangular JPGs that were loaded but are not yet in entryMap.
+  // equirectSourceFiles stores each file under TWO keys: canonical (no ext) + full filename.
+  // Only process the canonical key (no extension) to avoid duplicate entries.
+  equirectSourceFiles.forEach((file, key) => {
+    if (/\.[^/.]+$/.test(key)) return; // skip the full-filename duplicate
+    if (entryMap.has(key)) return;
+    const keyHotspots = panoramaHotspots.get(key) || [];
+    const viewState = sceneViewSettings.get(key) || (key === currentKey ? currentPanoramaViewState : { yaw: 0, pitch: 0 });
+    entryMap.set(key, {
+      key,
+      label: getSceneTitle(key, key),
+      root: `./tiles/${key}`,
+      previewUrl: `./tiles/${key}/preview.jpg`,
+      geometryType: 'equirect',
+      yaw: viewState.yaw,
+      pitch: viewState.pitch,
+      initialViewParameters: {
+        yaw: Number(viewState.yaw) || 0,
+        pitch: Number(viewState.pitch) || 0,
+        fov: Math.PI / 2
+      },
+      sceneSound: getSceneSound(key) || null,
+      sceneVideo: getSceneVideo(key) || null,
+      projectDetails: projectBuildingDetails,
+      hotspots: keyHotspots.map((hotspot) => ({
+        label: hotspot.label || 'Hotspot',
+        yaw: hotspot.yaw,
+        pitch: hotspot.pitch,
+        target: hotspot.target || key,
+        sizePercent: hotspot.sizePercent,
+        rotation: hotspot.rotation,
+        targetFov: hotspot.targetFov,
+        targetViewParameters: hotspot.targetViewParameters,
+        sound: hotspot.sound
+      }))
+    });
+  });
+
   if (fallbackKey && !entryMap.has(fallbackKey)) {
     entryMap.set(fallbackKey, fallbackEntry);
   }
 
-  return entryMap.size ? [...entryMap.values()] : [fallbackEntry];
+  // Sort by sidebar list order so export order matches what the user sees.
+  const sidebarRows = [...document.querySelectorAll('#files .file-name')];
+  const sortedEntries = [...entryMap.values()].sort((a, b) => {
+    const ai = sidebarRows.findIndex((r) => r.dataset.fileName === a.key);
+    const bi = sidebarRows.findIndex((r) => r.dataset.fileName === b.key);
+    return (ai < 0 ? Number.MAX_SAFE_INTEGER : ai) - (bi < 0 ? Number.MAX_SAFE_INTEGER : bi);
+  });
+
+  return sortedEntries.length ? sortedEntries : [fallbackEntry];
 }
 
 async function addExposePageToZip(zip, exportTargets) {
@@ -2036,6 +2251,10 @@ async function exportScene() {
         zip.file(path, await entry.async('arraybuffer'));
       }));
       [...panoramaFileGroups.entries()].forEach(([key, files]) => {
+        // Skip plain JPG entries tracked in equirectSourceFiles — handled separately below.
+        const canonicalKey = key.replace(/\.[^/.]+$/, '');
+        if (equirectSourceFiles.has(canonicalKey)) return;
+
         const exportKey = currentZipExportTargets.some((target) => target.key === key) ? `${key}-folder` : key;
         files.forEach((file) => {
           const relative = normalizeRelativePath(file.webkitRelativePath || file.relativePath || file.name);
@@ -2046,6 +2265,39 @@ async function exportScene() {
           zip.file(filePath, file);
         });
       });
+
+      // Also tile any plain equirect JPGs that were added on top of the ZIP project.
+      const zipImportedKeys = new Set(currentZipExportTargets.map((t) => t.key));
+      for (const [key, sourceFile] of equirectSourceFiles.entries()) {
+        if (/\.[^/.]+$/.test(key)) continue; // skip full-filename duplicates
+        if (zipImportedKeys.has(key)) continue; // already part of original ZIP
+        if ([...panoramaFileGroups.keys()].includes(key)) continue; // handled above
+
+        const target = exportTargets.find((t) => t.key === key);
+        if (!target) continue;
+
+        if (/\.jpe?g$/i.test(sourceFile.name)) {
+          showProgress(`Processing ${key}...`, 20);
+          const generated = officialEquirectResults.get(sourceFile) || await generateOfficialEquirectTiles(sourceFile, {
+            onProgress: (pct) => showProgress(`Processing ${key}... ${pct}%`, pct),
+          });
+          officialEquirectResults.set(sourceFile, generated);
+
+          target.geometryType = 'cube';
+          target.faceSize = generated.faceSize;
+          target.levels = generated.levels;
+
+          const sizeToIndex = new Map(generated.levels.map((lvl, i) => [lvl.size, i + 1]));
+          generated.tiles.forEach((tile) => {
+            const levelSize = tile.level?.size ?? tile.level;
+            const levelIndex = sizeToIndex.get(levelSize) ?? 1;
+            zip.file(`app-files/tiles/${key}/${levelIndex}/${tile.face}/${tile.y}/${tile.x}.jpg`, tile.data);
+          });
+          if (generated.preview) zip.file(`app-files/tiles/${key}/preview.jpg`, generated.preview);
+        } else {
+          zip.file(`app-files/tiles/${key}/preview.jpg`, sourceFile);
+        }
+      }
       await addExportSoundsToZip(zip, exportTargets);
       zip.file('app-files/data.js', buildMarzipanoDataJs(exportTargets));
       const originalIndexHtml = await currentZipArchive.file('app-files/index.html').async('string');
@@ -2099,6 +2351,42 @@ async function exportScene() {
         const zipPath = `app-files/tiles/${folderName}/${relativeToRoot}`;
         zip.file(zipPath, file);
       });
+    } else if (currentFile && /\.(jpe?g|png)$/i.test(currentFile.name) && currentFileType !== 'zip') {
+      // Export all plain equirectangular JPGs that were loaded (not just currentFile).
+      // equirectSourceFiles maps scene-key → original File for every loaded plain JPG.
+      const equirectEntries = equirectSourceFiles.size
+        ? [...equirectSourceFiles.entries()].filter(([key]) => !/\.[^/.]+$/.test(key))
+        : [[getMarzipanoTileFolder(currentFile) || currentFile.name.replace(/\.[^/.]+$/, '') || 'panorama', currentFile]];
+
+      for (const [sceneKey, sourceFile] of equirectEntries) {
+        const sceneTarget = exportTargets.find((target) => target.key === sceneKey);
+        if (!sceneTarget) continue;
+
+        if (/\.jpe?g$/i.test(sourceFile.name)) {
+          showProgress(`Processing ${sceneKey}... 0%`, 20);
+          const generated = officialEquirectResults.get(sourceFile) || await generateOfficialEquirectTiles(sourceFile, {
+            onProgress: (pct) => showProgress(`Processing ${sceneKey}... ${pct}%`, pct),
+          });
+          officialEquirectResults.set(sourceFile, generated);
+
+          sceneTarget.geometryType = 'cube';
+          sceneTarget.faceSize = generated.faceSize;
+          sceneTarget.levels = generated.levels;
+
+          const sizeToIndex = new Map(
+            generated.levels.map((lvl, i) => [lvl.size, i + 1])
+          );
+          generated.tiles.forEach((tile) => {
+            const levelSize = tile.level?.size ?? tile.level;
+            const levelIndex = sizeToIndex.get(levelSize) ?? 1;
+            zip.file(`app-files/tiles/${sceneKey}/${levelIndex}/${tile.face}/${tile.y}/${tile.x}.jpg`, tile.data);
+          });
+          if (generated.preview) zip.file(`app-files/tiles/${sceneKey}/preview.jpg`, generated.preview);
+        } else {
+          // PNG or other — store as equirect preview only
+          zip.file(`app-files/tiles/${sceneKey}/preview.jpg`, sourceFile);
+        }
+      }
     }
 
     const marzipanoScript = await fetch('/node_modules/marzipano/dist/marzipano.js').then((response) => response.text()).catch(() => '');
@@ -2147,12 +2435,9 @@ async function exportScene() {
 }
 
 const fileInput = document.querySelector('#file-input');
-const folderInput = document.querySelector('#folder-input');
 const headerFileTrigger = document.querySelector('#header-file-trigger');
-const headerFolderTrigger = document.querySelector('#header-folder-trigger');
 
 headerFileTrigger?.addEventListener('click', () => fileInput?.click());
-headerFolderTrigger?.addEventListener('click', () => folderInput?.click());
 
 const attachHeaderDropHandlers = (trigger, isFolder) => {
   if (!trigger) return;
@@ -2175,14 +2460,9 @@ const attachHeaderDropHandlers = (trigger, isFolder) => {
 };
 
 attachHeaderDropHandlers(headerFileTrigger, false);
-attachHeaderDropHandlers(headerFolderTrigger, true);
 
 fileInput?.addEventListener('change', (event) => {
   addFiles(event.target.files || []);
-  event.target.value = '';
-});
-folderInput?.addEventListener('change', (event) => {
-  addFiles(event.target.files || [], true);
   event.target.value = '';
 });
 document.querySelector('#export-btn').addEventListener('click', exportScene);

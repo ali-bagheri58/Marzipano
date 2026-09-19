@@ -175,10 +175,20 @@
   // Create scenes.
   var scenes = data.scenes.map(function(data) {
     var urlPrefix = "tiles";
-    var source = Marzipano.ImageUrlSource.fromString(
-      urlPrefix + "/" + data.id + "/{z}/{f}/{y}/{x}.jpg",
-      { cubeMapPreviewUrl: urlPrefix + "/" + data.id + "/preview.jpg" });
-    var geometry = new Marzipano.CubeGeometry(data.levels);
+    var isEquirect = data.geometryType === 'equirect';
+    var source = isEquirect
+      ? new Marzipano.ImageUrlSource(function() {
+          return { url: data.equirectUrl || (urlPrefix + "/" + data.id + "/preview.jpg") };
+        })
+      : Marzipano.ImageUrlSource.fromString(
+          urlPrefix + "/" + data.id + "/{z}/{f}/{y}/{x}.jpg",
+          { cubeMapPreviewUrl: urlPrefix + "/" + data.id + "/preview.jpg" });
+    var geometry = isEquirect
+      ? new Marzipano.EquirectGeometry([
+          { tileSize: 1024, size: 1024 },
+          { tileSize: 1024, size: 2048 }
+        ])
+      : new Marzipano.CubeGeometry(data.levels);
 
     var limiter = Marzipano.RectilinearView.limit.traditional(data.faceSize, 100*Math.PI/180, 120*Math.PI/180);
     var view = new Marzipano.RectilinearView(data.initialViewParameters, limiter);
