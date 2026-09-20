@@ -2613,7 +2613,15 @@ async function exportScene() {
     exportBtn.textContent = 'Exporting...';
 
     const sceneName = document.querySelector('#scene-name').textContent;
-    const exportTargets = buildExportTargets();
+    const exportTargets = buildExportTargets().map((target) => ({
+      ...target,
+      sceneSound: target.sceneSound ? { ...target.sceneSound } : null,
+      sceneVideo: target.sceneVideo ? { ...target.sceneVideo } : null,
+      hotspots: (target.hotspots || []).map((h) => ({
+        ...h,
+        sound: h.sound ? { ...h.sound } : null,
+      })),
+    }));
 
     if (currentZipArchive) {
       await Promise.all(Object.entries(currentZipArchive.files).filter(([, entry]) => !entry.dir).map(async ([path, entry]) => {
