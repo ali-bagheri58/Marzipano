@@ -2895,4 +2895,12 @@ function animate() {
 }
 animate();
 
+// Warn before leaving/refreshing if a project is loaded
+window.addEventListener('beforeunload', (event) => {
+  const hasContent = document.querySelector('#files .file-item') !== null;
+  if (!hasContent) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
+
 export { app };
