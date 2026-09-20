@@ -28,9 +28,10 @@ app.innerHTML = `
     <header class="topbar">
       <div class="top-actions">
         <label class="header-action" id="header-file-trigger">
-          <input id="file-input" type="file" accept=".glb,.gltf,.obj,.fbx,.jpg,.jpeg,.png,.zip" multiple />
+          <input id="file-input" type="file" accept=".zip" />
           <span>Open project</span>
         </label>
+        <button id="new-project-btn" class="badge" type="button">New project</button>
         <button id="add-hotspot-btn" class="badge hotspot-btn" style="display: none;">+ Hotspot</button>
         <button id="project-details-btn" class="badge" type="button">Project details</button>
         <button id="export-btn" class="badge export-btn" style="cursor: pointer; display: none;">Export</button>
@@ -42,6 +43,11 @@ app.innerHTML = `
       <aside class="sidebar">
         <p class="eyebrow">3D asset viewer</p>
         <h1 class="sidebar-title">Scene workspace</h1>
+        <label class="sidebar-add-btn" id="sidebar-add-scene-trigger">
+          <input id="sidebar-add-scene-input" type="file" accept=".glb,.gltf,.obj,.fbx,.jpg,.jpeg,.png" multiple />
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true"><path d="M6.5 1v11M1 6.5h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          Add scene
+        </label>
         <section class="file-list"><div class="section-label"><span>Scene files</span><span class="file-count" id="file-count">00</span></div><div class="files" id="files"><div class="empty-files">No files added yet</div></div></section>
       </aside>
       <div class="viewer">
@@ -948,6 +954,59 @@ function resetViewerAfterDelete() {
   document.querySelector('#add-hotspot-btn').style.display = 'none';
   document.querySelector('#scene-name').textContent = 'Studio preview';
   document.querySelector('#scene-meta').textContent = 'DEFAULT SCENE / 01';
+  status.textContent = '';
+}
+
+function resetAllState() {
+  // Full reset — clears all scenes, state and viewer
+  if (panoramaViewer) {
+    try { panoramaViewer.destroy(); } catch (e) {}
+    panoramaViewer = null;
+  }
+  activePanoramaScene = null;
+  activePanoramaViewListener = null;
+  panoramaHost.innerHTML = '';
+  renderer.domElement.style.display = '';
+  clearModel();
+  scene.add(defaultModel, floor, grid);
+  activeModel = defaultModel;
+
+  // Clear all data maps
+  currentFile = null;
+  currentFileType = null;
+  currentMarzipanoFiles = [];
+  currentZipSceneKey = null;
+  currentZipArchive = null;
+  currentZipExportTargets = [];
+  currentZipPreviewTileMap = {};
+  currentZipPreviewUrls = new Map();
+  currentZipLinkIconUrl = '';
+  panoramaFileGroups = new Map();
+  panoramaHotspots = new Map();
+  equirectSourceFiles = new Map();
+  sceneViewSettings = new Map();
+  sceneInitialViewSettings = new Map();
+  sceneSounds = new Map();
+  sceneVideos = new Map();
+  sceneTitles = new Map();
+  projectBuildingDetails = {};
+  currentPanoramaViewState = { yaw: 0, pitch: 0 };
+
+  // Clear sidebar list
+  const list = document.querySelector('#files');
+  list.innerHTML = '<div class="empty-files">No files added yet</div>';
+  document.querySelector('#file-count').textContent = '00';
+
+  // Reset buttons
+  document.querySelector('#export-btn').style.display = 'none';
+  document.querySelector('#preview-btn').style.display = 'none';
+  document.querySelector('#add-hotspot-btn').style.display = 'none';
+  document.querySelector('#header-add-scene-trigger') && (document.querySelector('#header-add-scene-trigger').style.display = 'none');
+  document.querySelector('#file-input').value = '';
+  document.querySelector('#sidebar-add-scene-input').value = '';
+  document.querySelector('#scene-name').textContent = 'Studio preview';
+  document.querySelector('#scene-meta').textContent = 'DEFAULT SCENE / 01';
+  hotspotPlacementMode = false;
   status.textContent = '';
 }
 
@@ -1970,6 +2029,23 @@ async function addExportSoundsToZip(zip, exportTargets) {
     const sound = hotspot.sound;
     if (!sound?.url && !sound?.file) return;
     if (sound.path) {
+      // Sound is from the original ZIP — read directly from archive instead of blob URL
+      // (blob URLs can become invalid; reading from archive is always reliable)
+      if (currentZipArchive) {
+        const appRoot = 'app-files/';
+        const entryPath = appRoot + sound.path;
+        const entry = currentZipArchive.file(entryPath);
+        if (entry) {
+          const bytes = await entry.async('arraybuffer');
+          const safeTarget = String(target.key || 'scene').replace(/[^a-z0-9_-]/gi, '_');
+          const extension = (sound.name || sound.path.split('/').pop()).match(/\.[a-z0-9]+$/i)?.[0] || '.mp3';
+          const newPath = `sounds/${safeTarget}/hotspot-${index + 1}${extension.toLowerCase()}`;
+          zip.file(`app-files/${newPath}`, bytes);
+          hotspot.sound = { url: newPath, name: sound.name || sound.path.split('/').pop(), loop: Boolean(sound.loop) };
+          return;
+        }
+      }
+      // Fallback: just reference the path (file will be copied from ZIP archive copy)
       hotspot.sound = { url: sound.path, name: sound.name || sound.path.split('/').pop(), loop: Boolean(sound.loop) };
       return;
     }
@@ -2234,7 +2310,17 @@ async function openExportPreview() {
     // Build the exact same ZIP as export, then open its index.html inline.
     const zip = new JSZip();
     const sceneName = document.querySelector('#scene-name')?.textContent || 'scene';
-    const exportTargets = buildExportTargets();
+    // Deep-clone only the sound/video fields so addExportSoundsToZip mutations
+    // don't affect the live panoramaHotspots state (which would break playback after preview).
+    const exportTargets = buildExportTargets().map((target) => ({
+      ...target,
+      sceneSound: target.sceneSound ? { ...target.sceneSound } : null,
+      sceneVideo: target.sceneVideo ? { ...target.sceneVideo } : null,
+      hotspots: (target.hotspots || []).map((h) => ({
+        ...h,
+        sound: h.sound ? { ...h.sound } : null,
+      })),
+    }));
 
     // ── copy ZIP archive files (if project was opened from a ZIP) ──────────
     if (currentZipArchive) {
@@ -2719,6 +2805,12 @@ async function exportScene() {
 
 const fileInput = document.querySelector('#file-input');
 const headerFileTrigger = document.querySelector('#header-file-trigger');
+const newProjectButton = document.querySelector('#new-project-btn');
+
+newProjectButton?.addEventListener('click', () => {
+  if (!window.confirm('Start a new project? All current scenes and changes will be cleared.')) return;
+  resetAllState();
+});
 
 headerFileTrigger?.addEventListener('click', () => fileInput?.click());
 
@@ -2745,6 +2837,21 @@ const attachHeaderDropHandlers = (trigger, isFolder) => {
 attachHeaderDropHandlers(headerFileTrigger, false);
 
 fileInput?.addEventListener('change', (event) => {
+  const files = [...(event.target.files || [])];
+  event.target.value = '';
+  if (!files.length) return;
+
+  const hasExistingContent = document.querySelector('#files .file-item') !== null;
+  if (hasExistingContent) {
+    if (!window.confirm('Opening a new project will clear all current scenes. Continue?')) return;
+    resetAllState();
+  }
+  addFiles(files);
+});
+
+// Sidebar "Add scene" button — accepts 3D models and images (not ZIP)
+const sidebarAddSceneInput = document.querySelector('#sidebar-add-scene-input');
+sidebarAddSceneInput?.addEventListener('change', (event) => {
   addFiles(event.target.files || []);
   event.target.value = '';
 });

@@ -28,7 +28,7 @@ button { cursor: pointer; }
 .brand-name span { color: var(--acid); font-weight: 500; }
 .top-actions { display: flex; align-items: center; justify-content: flex-start; flex-wrap: wrap; gap: 12px; width: fit-content; }
 #header-file-trigger { order: 1; margin-left: 0; }
-#header-folder-trigger { order: 2; }
+#new-project-btn { order: 2; }
 #add-hotspot-btn { order: 3; }
 #project-details-btn { order: 4; }
 #export-btn { order: 5; }
@@ -157,4 +157,29 @@ input[type='file'] { display: none; }
   .viewer-header { top: 18px; left: 18px; right: 18px; }
   .hint { right: 18px; bottom: 18px; }
   .footer { padding: 0 16px; }
+}
+
+/* ─── Sidebar Add Scene button ───────────────────────────────────── */
+.sidebar-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  margin-bottom: 18px;
+  padding: 9px 0;
+  border: 1.5px dashed rgba(255,255,255,.18);
+  border-radius: 8px;
+  background: rgba(255,255,255,.03);
+  color: var(--muted-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color .18s, background .18s, color .18s;
+  user-select: none;
+}
+.sidebar-add-btn:hover {
+  border-color: var(--acid);
+  background: var(--acid-dim);
+  color: var(--acid);
 }
