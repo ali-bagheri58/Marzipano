@@ -42,9 +42,9 @@
   }
 
   function playSceneSound(scene) {
-    if (!scene || !scene.sceneSound || !scene.sceneSound.url) return;
-    activeSceneAudio = new Audio(scene.sceneSound.url);
-    activeSceneAudio.loop = Boolean(scene.sceneSound.loop);
+    if (!scene || !scene.data || !scene.data.sceneSound || !scene.data.sceneSound.url) return;
+    activeSceneAudio = new Audio(scene.data.sceneSound.url);
+    activeSceneAudio.loop = Boolean(scene.data.sceneSound.loop);
     activeSceneAudio.play().catch(function() {});
   }
 
@@ -294,11 +294,11 @@
     return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;');
   }
 
-  function switchScene(scene) {
+  function switchScene(scene, overrideView) {
     stopHotspotSound();
     stopSceneSound();
     stopAutorotate();
-    scene.view.setParameters(scene.data.initialViewParameters);
+    scene.view.setParameters(overrideView || scene.data.initialViewParameters);
     scene.scene.switchTo();
     startAutorotate();
     updateSceneName(scene);
@@ -391,12 +391,12 @@
       var targetScene = findSceneById(hotspot.target);
       if (targetScene) {
         var targetView = hotspot.targetViewParameters || {};
-        targetScene.data.initialViewParameters = {
-          yaw: Number(targetView.yaw || targetScene.data.initialViewParameters.yaw || 0),
-          pitch: Number(targetView.pitch || targetScene.data.initialViewParameters.pitch || 0),
+        var overrideView = {
+          yaw: Number(targetView.yaw != null ? targetView.yaw : targetScene.data.initialViewParameters.yaw || 0),
+          pitch: Number(targetView.pitch != null ? targetView.pitch : targetScene.data.initialViewParameters.pitch || 0),
           fov: Number(targetView.fov || 120) * Math.PI / 180
         };
-        switchScene(targetScene);
+        switchScene(targetScene, overrideView);
       }
       playHotspotSound(hotspot);
     });

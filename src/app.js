@@ -34,6 +34,7 @@ app.innerHTML = `
         <button id="add-hotspot-btn" class="badge hotspot-btn" style="display: none;">+ Hotspot</button>
         <button id="project-details-btn" class="badge" type="button">Project details</button>
         <button id="export-btn" class="badge export-btn" style="cursor: pointer; display: none;">Export</button>
+        <button id="preview-btn" class="badge preview-btn" style="display: none;">Preview</button>
       </div>
       <div class="brand"><div class="brand-mark">K</div><div class="brand-name">Kaashi <span>/ studio</span></div></div>
     </header>
@@ -511,6 +512,7 @@ async function loadMarzipanoExportZip(file, targetIndex = 0, targetKey = null) {
     document.querySelector('#scene-name').textContent = getSceneTitle(firstTarget.key, firstTarget.label || file.name.replace(/\.[^/.]+$/, ''));
     document.querySelector('#scene-meta').textContent = 'PANORAMA / MARZIPANO ZIP';
     document.querySelector('#export-btn').style.display = 'inline-block';
+    document.querySelector('#preview-btn').style.display = 'inline-block';
     document.querySelector('#add-hotspot-btn').style.display = 'inline-block';
     status.textContent = '';
     showProgress('Ready', 100);
@@ -533,6 +535,7 @@ async function loadPanorama(file) {
     currentFileType = file.name.split('.').pop().toLowerCase();
     currentMarzipanoFiles = panoramaFileGroups.get(getMarzipanoTileFolder(file)) || [];
     document.querySelector('#export-btn').style.display = 'inline-block';
+    document.querySelector('#preview-btn').style.display = 'inline-block';
     document.querySelector('#add-hotspot-btn').style.display = 'inline-block';
 
     panoramaHost.innerHTML = '';
@@ -678,6 +681,7 @@ function loadFile(file) {
     currentFile = file;
     currentFileType = extension;
     document.querySelector('#export-btn').style.display = 'inline-block';
+    document.querySelector('#preview-btn').style.display = 'inline-block';
     document.querySelector('#add-hotspot-btn').style.display = 'none';
     document.querySelector('#scene-name').textContent = file.name;
     document.querySelector('#scene-meta').textContent = `${extension.toUpperCase()} / LOCAL ASSET`;
@@ -887,6 +891,10 @@ let currentZipPreviewTileMap = {};
 let currentZipPreviewUrls = new Map();
 const deletedZipScenes = new WeakMap();
 let sceneViewSettings = new Map();
+// Stores initial view set explicitly by the user via Properties dialog.
+// Unlike sceneViewSettings (which tracks current drag/scroll), this is only
+// written when the user clicks OK in Properties — never overwritten by panning.
+let sceneInitialViewSettings = new Map();
 let sceneSounds = new Map();
 let sceneVideos = new Map();
 let projectBuildingDetails = {};
@@ -936,6 +944,7 @@ function resetViewerAfterDelete() {
   currentZipArchive = null;
   currentZipExportTargets = [];
   document.querySelector('#export-btn').style.display = 'none';
+  document.querySelector('#preview-btn').style.display = 'none';
   document.querySelector('#add-hotspot-btn').style.display = 'none';
   document.querySelector('#scene-name').textContent = 'Studio preview';
   document.querySelector('#scene-meta').textContent = 'DEFAULT SCENE / 01';
@@ -1105,7 +1114,7 @@ function editSceneProperties(sceneKey) {
   soundPlayButton.addEventListener('click', () => {
     previewAudio?.pause();
     const file = soundInput.files?.[0];
-    const soundUrl = file ? URL.createObjectURL(file) : currentSound?.url;
+    const soundUrl = file ? URL.createObjectURL(file) : (currentSound?.url || (currentSound?.file ? URL.createObjectURL(currentSound.file) : null));
     if (!soundUrl) return;
     previewAudio = new Audio(soundUrl);
     previewAudio.loop = soundModeInput.value === 'loop';
@@ -1115,6 +1124,7 @@ function editSceneProperties(sceneKey) {
     if (save) {
       const settings = { yaw: Number(yawInput.value) || 0, pitch: Number(pitchInput.value) || 0 };
       sceneViewSettings.set(sceneKey, settings);
+      sceneInitialViewSettings.set(sceneKey, settings);
       const soundFile = soundInput.files?.[0];
       const videoFile = videoInput.files?.[0];
       if (videoFile) sceneVideos.set(sceneKey, { url: null, file: videoFile, name: videoFile.name });
@@ -1178,6 +1188,16 @@ function getSceneVideo(key) {
 }
 function getSceneSound(key) {
   return sceneSounds.get(key) || sceneSounds.get(key.replace(/\.[^/.]+$/, '')) || sceneSounds.get(`${key}.jpg`) || sceneSounds.get(`${key}.jpeg`) || sceneSounds.get(`${key}.png`) || null;
+}
+
+// Gets the user-set initial view for a scene key, trying both canonical and full-filename forms.
+function getInitialView(key, fallback) {
+  return sceneInitialViewSettings.get(key)
+    || sceneInitialViewSettings.get(key.replace(/\.[^/.]+$/, ''))
+    || sceneInitialViewSettings.get(`${key}.jpg`)
+    || sceneInitialViewSettings.get(`${key}.jpeg`)
+    || fallback
+    || { yaw: 0, pitch: 0 };
 }
 
 function getHotspotsForPanoramaKey(key) {
@@ -1388,7 +1408,9 @@ function editHotspotProperties(hotspot, isNew = false) {
   soundPlayButton.addEventListener('click', () => {
     previewAudio?.pause();
     const soundFile = soundInput.files?.[0];
-    const soundUrl = soundFile ? URL.createObjectURL(soundFile) : hotspot.sound?.url;
+    const soundUrl = soundFile
+      ? URL.createObjectURL(soundFile)
+      : (hotspot.sound?.url || (hotspot.sound?.file ? URL.createObjectURL(hotspot.sound.file) : null));
     if (!soundUrl) return;
     previewAudio = new Audio(soundUrl);
     previewAudio.loop = soundModeInput.value === 'loop';
@@ -1497,7 +1519,8 @@ function editHotspotProperties(hotspot, isNew = false) {
         hotspot.rotation = Number(rotationInput.value || 0) * Math.PI / 180;
         const soundFile = soundInput.files?.[0];
         if (soundFile) {
-          hotspot.sound = { url: await readFileAsDataUrl(soundFile), name: soundFile.name, loop: soundModeInput.value === 'loop' };
+          // Store file object directly (like sceneSound) — avoid large data URLs
+          hotspot.sound = { url: null, file: soundFile, name: soundFile.name, loop: soundModeInput.value === 'loop' };
         } else if (hotspot.sound) {
           hotspot.sound.loop = soundModeInput.value === 'loop';
         }
@@ -1643,16 +1666,16 @@ function buildExportTargets() {
 
   if (currentZipExportTargets.length) {
     const importedTargets = currentZipExportTargets.map((target) => {
-      const view = sceneViewSettings.get(target.key) || { yaw: target.yaw || 0, pitch: target.pitch || 0 };
+      const initView = getInitialView(target.key, { yaw: target.yaw || 0, pitch: target.pitch || 0 });
       return {
         ...target,
         label: getSceneTitle(target.key, target.label),
         exportSource: 'zip',
-        yaw: view.yaw,
-        pitch: view.pitch,
+        yaw: initView.yaw,
+        pitch: initView.pitch,
         initialViewParameters: {
-          yaw: Number(view.yaw) || 0,
-          pitch: Number(view.pitch) || 0,
+          yaw: Number(initView.yaw) || 0,
+          pitch: Number(initView.pitch) || 0,
           fov: Number(target.fov) || Math.PI / 2
         },
         sceneSound: sceneSounds.get(target.key) || target.sceneSound || null,
@@ -1724,9 +1747,7 @@ function buildExportTargets() {
   const panoramaEntries = [...panoramaFileGroups.entries()].map(([key, files]) => {
     const keyHotspots = panoramaHotspots.get(key) || [];
     const targetHotspots = keyHotspots.length ? keyHotspots : activeHotspots.length ? activeHotspots : [];
-    const viewState = sceneViewSettings.get(key) || ((key === currentKey && activePanoramaScene?.view)
-      ? getViewAngles(activePanoramaScene.view())
-      : currentPanoramaViewState);
+    const initView = getInitialView(key, sceneViewSettings.get(key));
 
     return {
       key,
@@ -1734,11 +1755,11 @@ function buildExportTargets() {
       root: `./tiles/${key}`,
       previewUrl: `./tiles/${key}/preview.jpg`,
       geometryType: 'cube',
-      yaw: viewState.yaw,
-      pitch: viewState.pitch,
+      yaw: initView.yaw,
+      pitch: initView.pitch,
       initialViewParameters: {
-        yaw: Number(viewState.yaw) || 0,
-        pitch: Number(viewState.pitch) || 0,
+        yaw: Number(initView.yaw) || 0,
+        pitch: Number(initView.pitch) || 0,
         fov: Math.PI / 2
       },
       sceneSound: getSceneSound(key) || null,
@@ -1768,17 +1789,18 @@ function buildExportTargets() {
   const fallbackKey = getMarzipanoTileFolder(currentFile) || currentFile?.name?.replace(/\.[^/.]+$/, '') || 'panorama';
   const fallbackHotspots = panoramaHotspots.get(fallbackKey) || [];
   const fallbackEntryHotspots = fallbackHotspots.length ? fallbackHotspots : activeHotspots.length ? activeHotspots : [];
+  const fallbackInitView = getInitialView(fallbackKey, currentPanoramaViewState);
   const fallbackEntry = {
     key: fallbackKey,
     label: getMarzipanoTileFolder(currentFile) || currentFile?.name || 'panorama',
     root: `./tiles/${fallbackKey}`,
     previewUrl: `./tiles/${fallbackKey}/preview.jpg`,
     geometryType: panoramaFileGroups.size ? 'cube' : 'equirect',
-    yaw: currentPanoramaViewState.yaw,
-    pitch: currentPanoramaViewState.pitch,
+    yaw: fallbackInitView.yaw,
+    pitch: fallbackInitView.pitch,
     initialViewParameters: {
-      yaw: Number(currentPanoramaViewState.yaw) || 0,
-      pitch: Number(currentPanoramaViewState.pitch) || 0,
+      yaw: Number(fallbackInitView.yaw) || 0,
+      pitch: Number(fallbackInitView.pitch) || 0,
       fov: Math.PI / 2
     },
     sceneSound: getSceneSound(fallbackKey) || null,
@@ -1804,21 +1826,21 @@ function buildExportTargets() {
   // equirectSourceFiles stores each file under TWO keys: canonical (no ext) + full filename.
   // Only process the canonical key (no extension) to avoid duplicate entries.
   equirectSourceFiles.forEach((file, key) => {
-    if (/\.[^/.]+$/.test(key)) return; // skip the full-filename duplicate
+    if (/\.[^/.]+$/.test(key)) return;
     if (entryMap.has(key)) return;
     const keyHotspots = panoramaHotspots.get(key) || [];
-    const viewState = sceneViewSettings.get(key) || (key === currentKey ? currentPanoramaViewState : { yaw: 0, pitch: 0 });
+    const initView = getInitialView(key, key === currentKey ? currentPanoramaViewState : { yaw: 0, pitch: 0 });
     entryMap.set(key, {
       key,
       label: getSceneTitle(key, key),
       root: `./tiles/${key}`,
       previewUrl: `./tiles/${key}/preview.jpg`,
       geometryType: 'equirect',
-      yaw: viewState.yaw,
-      pitch: viewState.pitch,
+      yaw: initView.yaw,
+      pitch: initView.pitch,
       initialViewParameters: {
-        yaw: Number(viewState.yaw) || 0,
-        pitch: Number(viewState.pitch) || 0,
+        yaw: Number(initView.yaw) || 0,
+        pitch: Number(initView.pitch) || 0,
         fov: Math.PI / 2
       },
       sceneSound: getSceneSound(key) || null,
@@ -1946,20 +1968,30 @@ function buildExposeHtml(exportTargets = []) {
 async function addExportSoundsToZip(zip, exportTargets) {
   await Promise.all(exportTargets.flatMap((target) => (target.hotspots || []).map(async (hotspot, index) => {
     const sound = hotspot.sound;
-    if (!sound?.url) return;
+    if (!sound?.url && !sound?.file) return;
     if (sound.path) {
       hotspot.sound = { url: sound.path, name: sound.name || sound.path.split('/').pop(), loop: Boolean(sound.loop) };
       return;
     }
     const safeTarget = String(target.key || 'scene').replace(/[^a-z0-9_-]/gi, '_');
-    const extension = (sound.name || 'sound.mp3').match(/\.[a-z0-9]+$/i)?.[0] || '.mp3';
+    const extension = (sound.name || sound.file?.name || 'sound.mp3').match(/\.[a-z0-9]+$/i)?.[0] || '.mp3';
     const path = `sounds/${safeTarget}/hotspot-${index + 1}${extension.toLowerCase()}`;
-    const response = sound.url.startsWith('data:') ? null : await fetch(sound.url);
-    const bytes = response
-      ? await response.arrayBuffer()
-      : Uint8Array.from(atob(sound.url.split(',')[1]), (character) => character.charCodeAt(0));
+    let bytes;
+    if (sound.file) {
+      bytes = await sound.file.arrayBuffer();
+    } else if (sound.url.startsWith('data:')) {
+      bytes = Uint8Array.from(atob(sound.url.split(',')[1]), (c) => c.charCodeAt(0));
+    } else {
+      // blob: or http: URL — fetch from current context
+      try {
+        bytes = await (await fetch(sound.url)).arrayBuffer();
+      } catch (e) {
+        console.warn('Could not fetch hotspot sound:', sound.url, e);
+        return;
+      }
+    }
     zip.file(`app-files/${path}`, bytes);
-    hotspot.sound = { url: path, name: sound.name || path.split('/').pop(), loop: Boolean(sound.loop) };
+    hotspot.sound = { url: path, name: sound.name || sound.file?.name || path.split('/').pop(), loop: Boolean(sound.loop) };
   })));
   await Promise.all(exportTargets.map(async (target) => {
     const sound = target.sceneSound;
@@ -2135,7 +2167,9 @@ function patchExportSceneVideoIndexJs(indexJs) {
   const withoutVideoFunctions = withVideoState.replace(videoFunctionPattern, '');
   const videoAnchor = withoutVideoFunctions.includes('function playSceneSound(scene) {')
     ? 'function playSceneSound(scene) {'
-    : 'function switchScene(scene) {';
+    : withoutVideoFunctions.includes('function switchScene(scene, overrideView) {')
+      ? 'function switchScene(scene, overrideView) {'
+      : 'function switchScene(scene) {';
   const withVideoButton = withoutVideoFunctions.replace(videoAnchor, `${videoFunction}\n  ${videoAnchor}`);
   return withVideoButton.replace('playSceneVideo(scene);', 'activeVideoScene = scene; playSceneVideo(scene);');
 }
@@ -2190,47 +2224,296 @@ function patchExportAvatarStyleCss(styleCss) {
 }
 
 async function openExportPreview() {
-  if (!currentFile && !panoramaFileGroups.size) return;
+  if (!currentFile && !panoramaFileGroups.size && !equirectSourceFiles.size) return;
 
-  const sceneName = document.querySelector('#scene-name')?.textContent || 'scene';
-  const exportTargets = buildExportTargets();
-  const currentKey = currentPanoramaKey();
-  const activeHotspots = panoramaHotspots.get(currentKey) || [];
-  const previewTargets = await Promise.all(exportTargets.map(async (item) => {
-    const key = item.key;
-    const files = panoramaFileGroups.get(key) || [];
-    const previewFile = files.find((file) => isPreviewFile(file)) || files[0] || currentMarzipanoFiles.find((file) => isPreviewFile(file)) || currentMarzipanoFiles[0] || (key === currentKey && currentFileType !== 'zip' ? currentFile : null);
-    const keyHotspots = panoramaHotspots.get(key) || [];
-    const targetHotspots = keyHotspots.length ? keyHotspots : activeHotspots.length ? activeHotspots : [];
+  const previewBtn = document.querySelector('#preview-btn');
+  previewBtn.disabled = true;
+  previewBtn.textContent = 'Building preview...';
 
-    return {
-      ...item,
-      previewUrl: previewFile ? await readFileAsDataUrl(previewFile) : (currentZipPreviewUrls.get(key) || item.previewUrl),
-      previewFaceUrls: currentZipPreviewUrls.has(key) ? await splitCubePreviewFaces(currentZipPreviewUrls.get(key)) : {},
-      hotspots: targetHotspots.map((hotspot) => ({
-        label: hotspot.label || 'Hotspot',
-        yaw: hotspot.yaw,
-        pitch: hotspot.pitch,
-        sizePercent: Math.min(200, Math.max(50, Number(hotspot.sizePercent) || 100)),
-        rotation: Number(hotspot.rotation || 0)
-      }))
+  try {
+    // Build the exact same ZIP as export, then open its index.html inline.
+    const zip = new JSZip();
+    const sceneName = document.querySelector('#scene-name')?.textContent || 'scene';
+    const exportTargets = buildExportTargets();
+
+    // ── copy ZIP archive files (if project was opened from a ZIP) ──────────
+    if (currentZipArchive) {
+      await Promise.all(
+        Object.entries(currentZipArchive.files)
+          .filter(([, e]) => !e.dir)
+          .map(async ([path, entry]) => zip.file(path, await entry.async('arraybuffer')))
+      );
+    }
+
+    // ── write tile files ───────────────────────────────────────────────────
+    if (currentZipArchive) {
+      // panoramaFileGroups tile folders (skip plain JPG duplicates)
+      [...panoramaFileGroups.entries()].forEach(([key, files]) => {
+        const canonicalKey = key.replace(/\.[^/.]+$/, '');
+        if (equirectSourceFiles.has(canonicalKey)) return;
+        const exportKey = currentZipExportTargets.some((t) => t.key === key) ? `${key}-folder` : key;
+        files.forEach((file) => {
+          const relative = normalizeRelativePath(file.webkitRelativePath || file.relativePath || file.name);
+          const tileIndex = relative.split('/').findIndex((s) => isMarzipanoTileLevelSegment(s));
+          const filePath = tileIndex > 0
+            ? `app-files/tiles/${exportKey}/${relative.split('/').slice(tileIndex).join('/')}`
+            : `app-files/tiles/${exportKey}/preview.jpg`;
+          zip.file(filePath, file);
+        });
+      });
+
+      // plain equirect JPGs added on top of ZIP
+      const zipImportedKeys = new Set(currentZipExportTargets.map((t) => t.key));
+      for (const [key, sourceFile] of equirectSourceFiles.entries()) {
+        if (/\.[^/.]+$/.test(key)) continue;
+        if (zipImportedKeys.has(key)) continue;
+        if ([...panoramaFileGroups.keys()].includes(key)) continue;
+        const target = exportTargets.find((t) => t.key === key);
+        if (!target) continue;
+        if (/\.jpe?g$/i.test(sourceFile.name)) {
+          const generated = officialEquirectResults.get(sourceFile) || await generateOfficialEquirectTiles(sourceFile, {
+            onProgress: (pct) => { previewBtn.textContent = `Building ${pct}%...`; }
+          });
+          officialEquirectResults.set(sourceFile, generated);
+          target.geometryType = 'cube';
+          target.faceSize = generated.faceSize;
+          target.levels = generated.levels;
+          const sizeToIndex = new Map(generated.levels.map((l, i) => [l.size, i + 1]));
+          generated.tiles.forEach((tile) => {
+            const li = sizeToIndex.get(tile.level?.size ?? tile.level) ?? 1;
+            zip.file(`app-files/tiles/${key}/${li}/${tile.face}/${tile.y}/${tile.x}.jpg`, tile.data);
+          });
+          if (generated.preview) zip.file(`app-files/tiles/${key}/preview.jpg`, generated.preview);
+        }
+      }
+    } else {
+      const allFiles = [...panoramaFileGroups.values()].flat();
+      if (allFiles.length) {
+        allFiles.forEach((file) => {
+          const relative = normalizeRelativePath(file.webkitRelativePath || file.relativePath || file.name);
+          const segments = relative.split('/').filter(Boolean);
+          const tli = segments.findIndex((s) => isMarzipanoTileLevelSegment(s));
+          const folderName = tli > 0 ? (segments.slice(0, tli).at(-1) || getMarzipanoTileFolder(file)) : (getMarzipanoTileFolder(file) || 'panorama');
+          const rel = tli > 0 ? segments.slice(tli).join('/') : (segments.slice(1).join('/') || file.name);
+          zip.file(`app-files/tiles/${folderName}/${rel}`, file);
+        });
+      } else if (currentFile && /\.(jpe?g|png)$/i.test(currentFile.name)) {
+        const equirectEntries = equirectSourceFiles.size
+          ? [...equirectSourceFiles.entries()].filter(([k]) => !/\.[^/.]+$/.test(k))
+          : [[getMarzipanoTileFolder(currentFile) || currentFile.name.replace(/\.[^/.]+$/, '') || 'panorama', currentFile]];
+        for (const [sceneKey, sourceFile] of equirectEntries) {
+          const sceneTarget = exportTargets.find((t) => t.key === sceneKey);
+          if (!sceneTarget) continue;
+          const generated = officialEquirectResults.get(sourceFile) || await generateOfficialEquirectTiles(sourceFile, {
+            onProgress: (pct) => { previewBtn.textContent = `Building ${pct}%...`; }
+          });
+          officialEquirectResults.set(sourceFile, generated);
+          sceneTarget.geometryType = 'cube';
+          sceneTarget.faceSize = generated.faceSize;
+          sceneTarget.levels = generated.levels;
+          const sizeToIndex = new Map(generated.levels.map((l, i) => [l.size, i + 1]));
+          generated.tiles.forEach((tile) => {
+            const li = sizeToIndex.get(tile.level?.size ?? tile.level) ?? 1;
+            zip.file(`app-files/tiles/${sceneKey}/${li}/${tile.face}/${tile.y}/${tile.x}.jpg`, tile.data);
+          });
+          if (generated.preview) zip.file(`app-files/tiles/${sceneKey}/preview.jpg`, generated.preview);
+        }
+      }
+    }
+
+    // ── write data.js + template files ────────────────────────────────────
+    // For preview: resolve media files to blob URLs directly without writing to ZIP,
+    // so large video files don't need to be base64-encoded into the HTML.
+    exportTargets.forEach((target) => {
+      if (target.sceneVideo?.file && !target.sceneVideo.url) {
+        target.sceneVideo = { ...target.sceneVideo, url: URL.createObjectURL(target.sceneVideo.file) };
+      }
+      if (target.sceneSound?.file && !target.sceneSound.url) {
+        target.sceneSound = { ...target.sceneSound, url: URL.createObjectURL(target.sceneSound.file) };
+      }
+      if (target.sceneSound?.url?.startsWith('blob:')) {
+        // Keep blob URL as-is — addExportSoundsToZip will fetch and write it to ZIP
+      }
+      (target.hotspots || []).forEach((hotspot) => {
+        if (hotspot.sound?.file && !hotspot.sound.url) {
+          hotspot.sound = { ...hotspot.sound, url: URL.createObjectURL(hotspot.sound.file) };
+        }
+      });
+    });
+    await addExportSoundsToZip(zip, exportTargets);
+    zip.file('app-files/data.js', buildMarzipanoDataJs(exportTargets));
+    zip.file('app-files/chat.js', buildExportChatScript(exportTargets[0]?.projectDetails || {}));
+    await addBundledMarzipanoTemplate(zip);
+    const templateIndexResponse = await fetch('/marzipano-template/app-files/index.html');
+    const templateIndexHtml = templateIndexResponse.ok ? await templateIndexResponse.text() : buildStandaloneMarzipanoIndexHtml(exportTargets);
+    const updatedIndexHtml = buildMarzipanoIndexHtml(templateIndexHtml, exportTargets).replace('</body>', '<script src="chat.js"></script>\n</body>');
+    zip.file('app-files/index.html', updatedIndexHtml);
+    const templateIndexJsResponse = await fetch('/marzipano-template/app-files/index.js');
+    if (templateIndexJsResponse.ok) {
+      zip.file('app-files/index.js', patchExportSceneVideoIndexJs(patchExportHotspotIndexJs(await templateIndexJsResponse.text())));
+    }
+    const templateStyleResponse = await fetch('/marzipano-template/app-files/style.css');
+    if (templateStyleResponse.ok) {
+      zip.file('app-files/style.css', patchExportAvatarStyleCss(patchExportHotspotStyleCss(await templateStyleResponse.text())));
+    }
+
+    // ── build self-contained HTML from the ZIP ────────────────────────────
+    // Read all files from the ZIP and build a single HTML that inlines
+    // everything as data URLs, so it works as a blob document.
+    const zipFiles = zip.files;
+
+    // Read all binary assets and build a lookup: normalized path → data URL or raw text
+    const assetMap = {};
+    const textExts = new Set(['js', 'css', 'html', 'txt']);
+    // Video/audio files are large — use blob URLs instead of base64 to avoid memory issues.
+    const blobExts = new Set(['mp4', 'webm', 'mp3', 'ogg', 'wav', 'm4a', 'aac']);
+    const blobUrls = []; // track for cleanup (not needed since page will be closed)
+
+    await Promise.all(
+      Object.entries(zipFiles)
+        .filter(([, e]) => !e.dir)
+        .map(async ([path]) => {
+          const normalized = path.replace(/^app-files\//, '');
+          const ext = path.split('.').pop().toLowerCase();
+          const mime = {
+            jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+            js: 'text/javascript', css: 'text/css', html: 'text/html',
+            mp3: 'audio/mpeg', mp4: 'video/mp4', webm: 'video/webm',
+            ogg: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4', aac: 'audio/aac'
+          }[ext] || 'application/octet-stream';
+
+          if (blobExts.has(ext)) {
+            // Large binary files: use blob URL to avoid base64 memory overhead
+            const data = await zipFiles[path].async('uint8array');
+            const blobUrl = URL.createObjectURL(new Blob([data], { type: mime }));
+            blobUrls.push(blobUrl);
+            assetMap[normalized] = blobUrl;
+          } else if (textExts.has(ext)) {
+            // Text files: UTF-8 safe base64 encoding
+            const text = await zipFiles[path].async('string');
+            const bytes = new TextEncoder().encode(text);
+            let binary = '';
+            bytes.forEach((b) => { binary += String.fromCharCode(b); });
+            assetMap[normalized] = `data:${mime};charset=utf-8;base64,${btoa(binary)}`;
+          } else {
+            // Other binary files (images): standard base64
+            const data = await zipFiles[path].async('uint8array');
+            let binary = '';
+            data.forEach((b) => { binary += String.fromCharCode(b); });
+            assetMap[normalized] = `data:${mime};base64,${btoa(binary)}`;
+          }
+        })
+    );
+
+    // Get the main index.html and inline all its resources
+    const indexEntry = zipFiles['app-files/index.html'];
+    let indexHtml = await indexEntry.async('string');
+
+    const assetMapJson = JSON.stringify(assetMap);
+
+    // Inline CSS
+    // Helper: decode a data URL back to UTF-8 string (handles multi-byte chars correctly)
+    const decodeText = (dataUrl) => {
+      const b64 = dataUrl.split(',')[1];
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new TextDecoder('utf-8').decode(bytes);
     };
-  }));
-  const tileUrlMap = await buildPreviewAssetMap(panoramaFileGroups);
-  Object.assign(tileUrlMap, currentZipPreviewTileMap);
-  tileUrlMap.__hotspotIcon = currentZipLinkIconUrl || '';
-  const marzipanoScript = await fetch('/node_modules/marzipano/dist/marzipano.js').then((response) => response.text()).catch(() => '');
-  const html = buildExportHtml(previewTargets, sceneName, tileUrlMap, marzipanoScript, 'inline');
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const previewUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = previewUrl;
-  anchor.target = '_blank';
-  anchor.rel = 'noopener noreferrer';
-  anchor.style.display = 'none';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
+
+    indexHtml = indexHtml.replace(/<link[^>]+href="([^"]+\.css)"[^>]*>/g, (match, href) => {
+      const key = href.replace(/^\.\//, '');
+      if (!assetMap[key]) return match;
+      return `<style>${decodeText(assetMap[key])}</style>`;
+    });
+
+    // Replace img src (icons etc.)
+    indexHtml = indexHtml.replace(/src="(img\/[^"]+)"/g, (match, src) => {
+      return assetMap[src] ? `src="${assetMap[src]}"` : match;
+    });
+
+    // Inline vendor/marzipano.js — inject the patch immediately after
+    indexHtml = indexHtml.replace(
+      /<script[^>]+src="([^"]*vendor\/marzipano\.js)"[^>]*><\/script>/,
+      (match, src) => {
+        const key = src.replace(/^\.\//, '');
+        if (!assetMap[key]) return match;
+        const marzJs = decodeText(assetMap[key]);
+        // Patch fromString to serve tiles from assetMap data URLs
+        const patch = `
+(function(){
+  var __am=${assetMapJson};
+  Marzipano.ImageUrlSource.fromString=function(tpl,opts){
+    return new Marzipano.ImageUrlSource(function(tile){
+      var u=tpl.replace('{z}',tile.z).replace('{f}',tile.face).replace('{y}',tile.y).replace('{x}',tile.x);
+      u=u.replace(/^\\.\\//, '');
+      if(__am[u]) return {url:__am[u]};
+      var prev=opts&&opts.cubeMapPreviewUrl;
+      if(prev){var pk=prev.replace(/^\\.\\//, ''); if(__am[pk]) return {url:__am[pk]};}
+      return {url:''};
+    });
+  };
+})();`;
+        return `<script>${marzJs}${patch}</script>`;
+      }
+    );
+
+    // Inline remaining JS files (data.js, vendor/*.js except marzipano already done, index.js)
+    indexHtml = indexHtml.replace(/<script[^>]+src="([^"]+\.js)"[^>]*><\/script>/g, (match, src) => {
+      const key = src.replace(/^\.\//, '');
+      if (!assetMap[key]) return match;
+      return `<script>${decodeText(assetMap[key])}</script>`;
+    });
+
+    // Patch image paths hardcoded in JavaScript (e.g. icon.src = 'img/link.png')
+    // These are inside inlined script content so HTML attribute replace won't catch them.
+    ['img/link.png', 'img/info.png', 'img/close.png', 'img/fullscreen.png',
+     'img/windowed.png', 'img/up.png', 'img/down.png', 'img/left.png', 'img/right.png',
+     'img/plus.png', 'img/minus.png', 'img/play.png', 'img/pause.png'].forEach((imgPath) => {
+      if (assetMap[imgPath]) {
+        // Replace both 'img/xxx' and "img/xxx" occurrences in JS strings
+        indexHtml = indexHtml.split(`'${imgPath}'`).join(`'${assetMap[imgPath]}'`);
+        indexHtml = indexHtml.split(`"${imgPath}"`).join(`"${assetMap[imgPath]}"`);
+      }
+    });
+
+    // Patch APP_DATA to replace relative video/sound URLs with data URLs from assetMap.
+    // Inject BEFORE index.js so when index.js's load handler fires, URLs are already patched.
+    const mediaPatch = `
+(function(){
+  var __am=${assetMapJson};
+  function fixUrl(url){ if(!url) return url; var k=url.replace(/^\\.?\\//, ''); return __am[k]||url; }
+  window.addEventListener('DOMContentLoaded', function(){
+    if(!window.APP_DATA||!APP_DATA.scenes) return;
+    APP_DATA.scenes.forEach(function(s){
+      if(s.sceneVideo) s.sceneVideo.url=fixUrl(s.sceneVideo.url);
+      if(s.sceneSound) s.sceneSound.url=fixUrl(s.sceneSound.url);
+      (s.linkHotspots||[]).forEach(function(h){ if(h.sound) h.sound.url=fixUrl(h.sound.url); });
+    });
+  });
+})();`;
+
+    // Insert media patch right after the last data.js script tag and before index.js
+    indexHtml = indexHtml.replace(
+      /<script>var APP_DATA/,
+      `<script>${mediaPatch}<\/script><script>var APP_DATA`
+    );
+
+    const blob = new Blob([indexHtml], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+  } catch (err) {
+    console.error('Preview failed', err);
+    alert('Preview failed: ' + (err?.message || err));
+  } finally {
+    previewBtn.disabled = false;
+    previewBtn.textContent = 'Preview';
+  }
 }
 
 async function exportScene() {
@@ -2466,6 +2749,7 @@ fileInput?.addEventListener('change', (event) => {
   event.target.value = '';
 });
 document.querySelector('#export-btn').addEventListener('click', exportScene);
+document.querySelector('#preview-btn').addEventListener('click', openExportPreview);
 document.querySelector('#project-details-btn').addEventListener('click', editProjectDetails);
 document.querySelector('#add-hotspot-btn').addEventListener('click', () => {
   hotspotPlacementMode = !hotspotPlacementMode;

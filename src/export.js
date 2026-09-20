@@ -429,20 +429,27 @@ export function buildExportHtml(exportTargets, sceneName, tileUrlMap = {}, marzi
             ]);
           } else {
             source = new Marzipano.ImageUrlSource((tile) => {
+              const suffix = tile.z + '/' + tile.face + '/' + tile.y + '/' + tile.x;
               const candidates = [
-                tile.z + '/' + tile.face + '/' + tile.y + '/' + tile.x + '.jpg',
-                tile.z + '/' + tile.face + '/' + tile.y + '/' + tile.x + '.png',
-                tile.z + '/' + tile.face + '/' + tile.y + '/' + tile.x + '.jpeg'
+                item.id + '/' + suffix + '.jpg',
+                item.id + '/' + suffix + '.png',
+                suffix + '.jpg',
+                suffix + '.png',
+                suffix + '.jpeg'
               ];
               const url = candidates.map((key) => tileUrlMap[key]).find(Boolean);
               return { url: url || item.previewUrl || '' };
             });
-            geometry = new Marzipano.CubeGeometry([
-              { tileSize: 256, size: 256, fallbackOnly: true },
-              { tileSize: 512, size: 512 },
-              { tileSize: 512, size: 1024 },
-              { tileSize: 512, size: 2048 }
-            ]);
+            geometry = new Marzipano.CubeGeometry(
+              (item.levels && item.levels.length)
+                ? item.levels
+                : [
+                    { tileSize: 256, size: 256, fallbackOnly: true },
+                    { tileSize: 512, size: 512 },
+                    { tileSize: 512, size: 1024 },
+                    { tileSize: 512, size: 2048 }
+                  ]
+            );
           }
 
           const view = new Marzipano.RectilinearView({ yaw: Number(item.yaw || 0), pitch: Number(item.pitch || 0), fov: 100 * Math.PI / 180 }, Marzipano.RectilinearView.limit.traditional(2048, 120 * Math.PI / 180));
