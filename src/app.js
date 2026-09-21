@@ -34,6 +34,7 @@ app.innerHTML = `
         <button id="new-project-btn" class="badge" type="button">New project</button>
         <button id="add-hotspot-btn" class="badge hotspot-btn" style="display: none;">+ Hotspot</button>
         <button id="project-details-btn" class="badge" type="button">Project details</button>
+        <button id="floorplan-btn" class="badge" style="display: none;" type="button">Floor plan</button>
         <button id="export-btn" class="badge export-btn" style="cursor: pointer; display: none;">Export</button>
         <button id="preview-btn" class="badge preview-btn" style="display: none;">Preview</button>
       </div>
@@ -313,6 +314,29 @@ async function loadMarzipanoExportZip(file, targetIndex = 0, targetKey = null) {
     const linkIconPath = [...zipFiles.keys()].find((path) => /(^|\/)img\/link\.png$/i.test(path));
     currentZipLinkIconUrl = linkIconPath ? await blobUrlFromZipEntry(zip, linkIconPath) : '';
 
+    // Load floor plan if present (only on first load of a new ZIP)
+    if (isNewZip) {
+      floorPlanFile = null;
+      floorPlanHotspots = [];
+      const fpDataPath = [...zipFiles.keys()].find((p) => /floorplan\/data\.json$/i.test(p));
+      if (fpDataPath) {
+        try {
+          const fpData = JSON.parse(await zipFiles.get(fpDataPath).async('string'));
+          floorPlanHotspots = fpData.hotspots || [];
+          const fpImagePath = fpDataPath.replace('data.json', fpData.image || 'plan.png');
+          const fpEntry = zipFiles.get(fpImagePath);
+          if (fpEntry) {
+            const fpBytes = await fpEntry.async('uint8array');
+            const ext = (fpData.image || 'plan.png').split('.').pop();
+            const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
+            floorPlanFile = new File([fpBytes], fpData.image || 'plan.png', { type: mime });
+          }
+        } catch (e) {
+          console.warn('Failed to load floor plan from ZIP', e);
+        }
+      }
+    }
+
     const manifestPath = [...zipFiles.keys()].find((path) => path.endsWith('panorama-data.json')) || [...zipFiles.keys()].find((path) => path.endsWith('data.json'));
     const appDataPath = [...zipFiles.keys()].find((path) => path.endsWith('data.js'));
     let exportTargets = [];
@@ -518,6 +542,7 @@ async function loadMarzipanoExportZip(file, targetIndex = 0, targetKey = null) {
     document.querySelector('#scene-name').textContent = getSceneTitle(firstTarget.key, firstTarget.label || file.name.replace(/\.[^/.]+$/, ''));
     document.querySelector('#scene-meta').textContent = 'PANORAMA / MARZIPANO ZIP';
     document.querySelector('#export-btn').style.display = 'inline-block';
+    document.querySelector('#floorplan-btn').style.display = 'inline-block';
     document.querySelector('#preview-btn').style.display = 'inline-block';
     document.querySelector('#add-hotspot-btn').style.display = 'inline-block';
     status.textContent = '';
@@ -541,6 +566,7 @@ async function loadPanorama(file) {
     currentFileType = file.name.split('.').pop().toLowerCase();
     currentMarzipanoFiles = panoramaFileGroups.get(getMarzipanoTileFolder(file)) || [];
     document.querySelector('#export-btn').style.display = 'inline-block';
+    document.querySelector('#floorplan-btn').style.display = 'inline-block';
     document.querySelector('#preview-btn').style.display = 'inline-block';
     document.querySelector('#add-hotspot-btn').style.display = 'inline-block';
 
@@ -687,6 +713,7 @@ function loadFile(file) {
     currentFile = file;
     currentFileType = extension;
     document.querySelector('#export-btn').style.display = 'inline-block';
+    document.querySelector('#floorplan-btn').style.display = 'inline-block';
     document.querySelector('#preview-btn').style.display = 'inline-block';
     document.querySelector('#add-hotspot-btn').style.display = 'none';
     document.querySelector('#scene-name').textContent = file.name;
@@ -905,6 +932,10 @@ let sceneSounds = new Map();
 let sceneVideos = new Map();
 let projectBuildingDetails = {};
 let hotspotPlacementMode = false;
+
+// ── Floor plan state ─────────────────────────────────────────────
+let floorPlanFile = null;          // File object of the floor plan image
+let floorPlanHotspots = [];        // [{ x, y, sceneKey, label }]  x/y in % of image size
 let currentPanoramaViewState = { yaw: 0, pitch: 0 };
 let activePanoramaViewListener = null;
 
@@ -950,6 +981,7 @@ function resetViewerAfterDelete() {
   currentZipArchive = null;
   currentZipExportTargets = [];
   document.querySelector('#export-btn').style.display = 'none';
+    document.querySelector('#floorplan-btn').style.display = 'none';
   document.querySelector('#preview-btn').style.display = 'none';
   document.querySelector('#add-hotspot-btn').style.display = 'none';
   document.querySelector('#scene-name').textContent = 'Studio preview';
@@ -991,6 +1023,8 @@ function resetAllState() {
   sceneTitles = new Map();
   projectBuildingDetails = {};
   currentPanoramaViewState = { yaw: 0, pitch: 0 };
+  floorPlanFile = null;
+  floorPlanHotspots = [];
 
   // Clear sidebar list
   const list = document.querySelector('#files');
@@ -999,6 +1033,7 @@ function resetAllState() {
 
   // Reset buttons
   document.querySelector('#export-btn').style.display = 'none';
+    document.querySelector('#floorplan-btn').style.display = 'none';
   document.querySelector('#preview-btn').style.display = 'none';
   document.querySelector('#add-hotspot-btn').style.display = 'none';
   document.querySelector('#header-add-scene-trigger') && (document.querySelector('#header-add-scene-trigger').style.display = 'none');
@@ -1036,6 +1071,266 @@ function removeSceneItem(item, file, sceneKey, isZipScene) {
   item.remove();
   document.querySelector('#file-count').textContent = String(document.querySelector('#files').children.length).padStart(2, '0');
   if (isActive) resetViewerAfterDelete();
+}
+
+function openFloorPlanEditor() {
+  const keys = getHotspotTargetOptions();
+  const dialog = document.createElement('div');
+  dialog.className = 'hotspot-dialog-backdrop fp-backdrop';
+  dialog.innerHTML = `
+    <div class="fp-dialog" role="dialog" aria-modal="true">
+      <div class="fp-header">
+        <h3>Floor plan</h3>
+        <div class="fp-header-actions">
+          <label class="fp-load-btn">
+            <input id="fp-file-input" type="file" accept="image/*" />
+            Load image
+          </label>
+          <button type="button" class="fp-close-btn" aria-label="Close">×</button>
+        </div>
+      </div>
+      <div class="fp-body">
+        <div class="fp-canvas-wrap" id="fp-canvas-wrap">
+          <div class="fp-empty" id="fp-empty">Click "Load image" to add a floor plan</div>
+          <img class="fp-image" id="fp-image" alt="Floor plan" style="display:none;" />
+          <div class="fp-hotspots" id="fp-hotspots"></div>
+        </div>
+      </div>
+      <div class="fp-footer">
+        <span class="fp-hint" id="fp-hint">Load an image and click to place hotspots</span>
+        <div class="fp-footer-actions">
+          <button type="button" class="fp-clear-btn" id="fp-clear-btn">Clear all</button>
+          <button type="button" class="fp-save-btn" id="fp-save-btn">Save</button>
+        </div>
+      </div>
+    </div>`;
+
+  document.body.appendChild(dialog);
+
+  const fpFileInput = dialog.querySelector('#fp-file-input');
+  const fpImage = dialog.querySelector('#fp-image');
+  const fpEmpty = dialog.querySelector('#fp-empty');
+  const fpHotspotsEl = dialog.querySelector('#fp-hotspots');
+  const fpCanvasWrap = dialog.querySelector('#fp-canvas-wrap');
+  const fpHint = dialog.querySelector('#fp-hint');
+
+  // Working copy
+  let workingHotspots = floorPlanHotspots.map((h) => ({ ...h }));
+  let workingFile = floorPlanFile;
+  let placing = false;
+
+  function renderHotspots() {
+    fpHotspotsEl.innerHTML = '';
+    workingHotspots.forEach((h, i) => {
+      const pin = document.createElement('div');
+      pin.className = 'fp-pin';
+      pin.style.left = h.x + '%';
+      pin.style.top = h.y + '%';
+      pin.title = h.label || h.sceneKey;
+      const dotSize = h.size || 14;
+      const dotColor = h.color || '#c8f135';
+      pin.innerHTML = `<span class="fp-pin-dot" style="width:${dotSize}px;height:${dotSize}px;background:${dotColor};box-shadow:0 0 8px ${dotColor}88"></span><span class="fp-pin-label">${h.label || h.sceneKey}</span>`;
+
+      // Click to edit (scene, color, size) in one popup
+      pin.addEventListener('click', (e) => {
+        e.stopPropagation();
+        fpHotspotsEl.querySelectorAll('.fp-pin-editor').forEach(el => el.remove());
+        const editor = document.createElement('div');
+        editor.className = 'fp-pin-editor';
+        editor.innerHTML = `
+          <div class="fp-pin-editor-row">
+            <label>Scene
+              <select class="fp-pin-scene">${keys.map(k => `<option value="${k}"${k === h.sceneKey ? ' selected' : ''}>${getSceneTitle(k, k)}</option>`).join('')}</select>
+            </label>
+          </div>
+          <div class="fp-pin-editor-row" style="margin-top:8px">
+            <label>Color<input type="color" class="fp-pin-color" value="${h.color || '#c8f135'}"></label>
+            <label>Size<input type="range" class="fp-pin-size" min="8" max="60" value="${h.size || 14}"></label>
+            <span class="fp-pin-size-val">${h.size || 14}px</span>
+          </div>`;
+        pin.appendChild(editor);
+        editor.addEventListener('click', ev => ev.stopPropagation());
+        editor.addEventListener('mousedown', ev => ev.stopPropagation());
+
+        const sceneSelect = editor.querySelector('.fp-pin-scene');
+        const colorInput = editor.querySelector('.fp-pin-color');
+        const sizeInput = editor.querySelector('.fp-pin-size');
+        const sizeVal = editor.querySelector('.fp-pin-size-val');
+
+        const apply = () => {
+          workingHotspots[i].sceneKey = sceneSelect.value;
+          workingHotspots[i].label = getSceneTitle(sceneSelect.value, sceneSelect.value);
+          workingHotspots[i].color = colorInput.value;
+          workingHotspots[i].size = Number(sizeInput.value);
+          sizeVal.textContent = sizeInput.value + 'px';
+          const dot = pin.querySelector('.fp-pin-dot');
+          dot.style.width = sizeInput.value + 'px';
+          dot.style.height = sizeInput.value + 'px';
+          dot.style.background = colorInput.value;
+          dot.style.boxShadow = `0 0 8px ${colorInput.value}88`;
+          pin.querySelector('.fp-pin-label').textContent = workingHotspots[i].label;
+        };
+        sceneSelect.addEventListener('change', apply);
+        colorInput.addEventListener('input', apply);
+        sizeInput.addEventListener('input', apply);
+
+        setTimeout(() => {
+          const close = (ev) => { if (!editor.contains(ev.target)) { editor.remove(); document.removeEventListener('mousedown', close); } };
+          document.addEventListener('mousedown', close);
+        }, 0);
+      });
+
+      // Drag to move
+      pin.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        let dragged = false;
+        pin.style.cursor = 'grabbing';
+        const onMove = (me) => {
+          dragged = true;
+          const rect = fpImage.getBoundingClientRect();
+          const nx = Math.max(0, Math.min(100, ((me.clientX - rect.left) / rect.width) * 100));
+          const ny = Math.max(0, Math.min(100, ((me.clientY - rect.top) / rect.height) * 100));
+          workingHotspots[i].x = parseFloat(nx.toFixed(2));
+          workingHotspots[i].y = parseFloat(ny.toFixed(2));
+          pin.style.left = nx + '%';
+          pin.style.top = ny + '%';
+        };
+        const onUp = (ue) => {
+          pin.style.cursor = '';
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          // If dragged, block the following click on canvas
+          if (dragged) {
+            ue.stopPropagation();
+            const blockNext = (ce) => { ce.stopPropagation(); fpCanvasWrap.removeEventListener('click', blockNext, true); };
+            fpCanvasWrap.addEventListener('click', blockNext, true);
+          }
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+
+      // Delete on right-click
+      pin.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        workingHotspots.splice(i, 1);
+        renderHotspots();
+      });
+      fpHotspotsEl.appendChild(pin);
+    });
+  }
+
+  function loadImage(file) {
+    workingFile = file;
+    const url = URL.createObjectURL(file);
+    fpImage.src = url;
+    fpImage.style.display = 'block';
+    fpEmpty.style.display = 'none';
+    fpHint.textContent = 'Click on the floor plan to place a hotspot · Right-click a pin to delete it';
+  }
+
+  if (workingFile) loadImage(workingFile);
+  renderHotspots();
+
+  fpFileInput.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) loadImage(file);
+    e.target.value = '';
+  });
+
+  fpCanvasWrap.addEventListener('click', (e) => {
+    if (!workingFile) return;
+    if (e.target.closest('.fp-pin')) return;
+    if (e.target === fpFileInput || e.target.closest('.fp-load-btn')) return;
+    // If a picker is already open, ignore clicks on canvas
+    if (fpHotspotsEl.querySelector('.fp-picker')) return;
+
+    const rect = fpImage.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    if (x < 0 || x > 100 || y < 0 || y > 100) return;
+
+    // Show combined editor as a fixed modal (not positioned on floor plan)
+    const existingModal = document.querySelector('.fp-hotspot-modal');
+    if (existingModal) existingModal.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'fp-hotspot-modal';
+    modal.innerHTML = `
+      <div class="fp-hotspot-modal-box">
+        <div class="fp-hotspot-modal-header">
+          <span>New hotspot</span>
+          <button type="button" class="fp-hotspot-modal-close">×</button>
+        </div>
+        <div class="fp-hotspot-modal-body">
+          <label class="fp-hotspot-modal-label">
+            Scene
+            <select class="fp-pin-scene">
+              ${keys.map(k => `<option value="${k}">${getSceneTitle(k, k)}</option>`).join('')}
+            </select>
+          </label>
+          <label class="fp-hotspot-modal-label">
+            Color
+            <input type="color" class="fp-pin-color" value="#c8f135">
+          </label>
+          <label class="fp-hotspot-modal-label">
+            Size
+            <div class="fp-hotspot-modal-range">
+              <input type="range" class="fp-pin-size" min="8" max="60" value="14">
+              <span class="fp-pin-size-val">14px</span>
+            </div>
+          </label>
+        </div>
+        <div class="fp-hotspot-modal-footer">
+          <button type="button" class="fp-picker-cancel">Cancel</button>
+          <button type="button" class="fp-picker-confirm">Add hotspot</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+
+    modal.addEventListener('click', ev => { if (ev.target === modal) modal.remove(); });
+    modal.querySelector('.fp-hotspot-modal-close').addEventListener('click', () => modal.remove());
+    modal.querySelector('.fp-picker-cancel').addEventListener('click', () => modal.remove());
+
+    modal.querySelector('.fp-pin-size').addEventListener('input', (ev) => {
+      modal.querySelector('.fp-pin-size-val').textContent = ev.target.value + 'px';
+    });
+
+    modal.querySelector('.fp-picker-confirm').addEventListener('click', () => {
+      const sceneKey = modal.querySelector('.fp-pin-scene').value;
+      const color = modal.querySelector('.fp-pin-color').value;
+      const size = Number(modal.querySelector('.fp-pin-size').value);
+      if (sceneKey) {
+        workingHotspots.push({ x: parseFloat(x.toFixed(2)), y: parseFloat(y.toFixed(2)), sceneKey, label: getSceneTitle(sceneKey, sceneKey), color, size });
+        renderHotspots();
+      }
+      modal.remove();
+    });
+
+    // Close if clicking outside
+    setTimeout(() => {
+      const outside = (e) => { if (!modal.contains(e.target)) { modal.remove(); document.removeEventListener('mousedown', outside); } };
+      document.addEventListener('mousedown', outside);
+    }, 0);
+  });
+
+  dialog.querySelector('#fp-clear-btn').addEventListener('click', () => {
+    if (window.confirm('Clear all floor plan hotspots?')) {
+      workingHotspots = [];
+      renderHotspots();
+    }
+  });
+
+  dialog.querySelector('#fp-save-btn').addEventListener('click', () => {
+    floorPlanFile = workingFile;
+    floorPlanHotspots = workingHotspots;
+    dialog.remove();
+  });
+
+  dialog.querySelector('.fp-close-btn').addEventListener('click', () => dialog.remove());
+  dialog.addEventListener('click', (e) => { if (e.target === dialog) dialog.remove(); });
 }
 
 function editProjectDetails() {
@@ -1315,14 +1610,14 @@ function playHotspotSound(hotspot) {
 function getHotspotTargetOptions() {
   const keys = currentZipExportTargets.map((target) => target.key);
   panoramaFileGroups.forEach((files, key) => {
+    // Skip plain JPG entries tracked in equirectSourceFiles — added separately below
+    const canonicalKey = key.replace(/\.[^/.]+$/, '');
+    if (equirectSourceFiles.has(canonicalKey)) return;
     if (!keys.includes(key)) keys.push(key);
   });
-  // Plain equirectangular JPGs are tracked in equirectSourceFiles (not panoramaFileGroups).
-  // Use the extension-free key (canonical scene key) so it matches sceneViewSettings etc.
+  // Plain equirectangular JPGs — use canonical key (no extension)
   equirectSourceFiles.forEach((file, key) => {
-    // Skip the duplicate entry that stores the full filename (e.g. "img.jpg")
-    // — only keep the canonical key without extension.
-    if (/\.[^/.]+$/.test(key)) return;
+    if (/\.[^/.]+$/.test(key)) return; // skip full-filename duplicate
     if (!keys.includes(key)) keys.push(key);
   });
   return keys;
@@ -2024,6 +2319,125 @@ function buildExposeHtml(exportTargets = []) {
 </html>`;
 }
 
+// Saves floor plan image + hotspot data into the ZIP under app-files/floorplan/
+async function addFloorPlanToZip(zip) {
+  if (!floorPlanFile) return;
+  const ext = floorPlanFile.name.split('.').pop().toLowerCase() || 'png';
+  const bytes = await floorPlanFile.arrayBuffer();
+  zip.file(`app-files/floorplan/plan.${ext}`, bytes);
+  zip.file('app-files/floorplan/data.json', JSON.stringify({
+    image: `plan.${ext}`,
+    hotspots: floorPlanHotspots
+  }, null, 2));
+
+  // Convert image to data URL so floorplan.js can embed it inline
+  // (works in both blob-document preview and file:// export)
+  const imageDataUrl = await readFileAsDataUrl(floorPlanFile);
+  const fpScript = buildFloorPlanScript(imageDataUrl, floorPlanHotspots);
+  zip.file('app-files/floorplan/floorplan.js', fpScript);
+}
+
+function buildFloorPlanScript(imagePath, hotspots) {
+  return `(function(){
+  var FP_IMAGE = '${imagePath}';
+  var FP_HOTSPOTS = ${JSON.stringify(hotspots)};
+
+  var style = document.createElement('style');
+  style.textContent = [
+    '.fp-fab{position:fixed;right:18px;top:132px;z-index:50;width:52px;height:52px;border:0;border-radius:50%;background:#1a2a1a;border:2px solid #c8f135;color:#c8f135;font-size:22px;box-shadow:0 4px 16px rgba(0,0,0,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;}',
+    '.fp-fab:hover{background:#243024;}',
+    '.fp-panel{position:fixed;inset:0;z-index:50;width:100vw;height:100vh;background:rgba(10,14,17,.98);border:0;border-radius:0;box-shadow:none;overflow:hidden;display:none;}',
+    '.fp-panel.is-open{display:flex;flex-direction:column;}',
+    '.fp-panel-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.08);}',
+    '.fp-panel-title{color:#f1f2ef;font-size:13px;font-weight:600;font-family:sans-serif;}',
+    '.fp-panel-close{width:28px;height:28px;border:1px solid rgba(255,255,255,.12);border-radius:6px;background:transparent;color:#9ca3af;font-size:16px;cursor:pointer;display:grid;place-items:center;}',
+    '.fp-panel-close:hover{border-color:#c8f135;color:#c8f135;}',
+    '.fp-panel-body{position:relative;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:12px;}',
+    '.fp-plan-img{display:block;max-width:100%;max-height:100%;width:auto;height:auto;border-radius:8px;}',
+    '.fp-plan-pins{position:absolute;z-index:1;pointer-events:none;}',
+    '.fp-plan-pin{position:absolute;transform:translate(-50%,-50%);pointer-events:all;cursor:pointer;transition:transform .15s;}',
+    '.fp-plan-pin:hover{transform:translate(-50%,-50%) scale(1.25);}',
+    '.fp-plan-pin-dot{display:block;border-radius:50%;border:2px solid #fff;box-shadow:0 0 8px rgba(200,241,53,.5);}',
+    '.fp-plan-pin-tip{position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);white-space:nowrap;padding:3px 8px;border:1px solid rgba(200,241,53,.35);border-radius:4px;background:rgba(8,11,14,.92);color:#f1f2ef;font-size:10px;font-family:monospace;opacity:0;transition:opacity .15s;pointer-events:none;}',
+    '.fp-plan-pin:hover .fp-plan-pin-tip{opacity:1;}',
+    '@media(max-width:600px){.fp-fab{top:126px;right:10px;width:46px;height:46px;}}'
+  ].join('');
+  document.head.appendChild(style);
+
+  // FAB button
+  var fab = document.createElement('button');
+  fab.className = 'fp-fab';
+  fab.setAttribute('aria-label', 'Floor plan');
+  fab.innerHTML = '<svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.6"/><rect x="12" y="2" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.6"/><rect x="2" y="12" width="8" height="18" rx="1" stroke="currentColor" stroke-width="1.6"/><rect x="12" y="12" width="8" height="8" rx="1" stroke="currentColor" stroke-width="1.6"/></svg>';
+
+  // Panel
+  var panel = document.createElement('div');
+  panel.className = 'fp-panel';
+  panel.innerHTML = '<div class="fp-panel-head"><span class="fp-panel-title">Floor plan</span><button class="fp-panel-close" type="button">×</button></div><div class="fp-panel-body"><img class="fp-plan-img" /><div class="fp-plan-pins"></div></div>';
+
+  var img = panel.querySelector('.fp-plan-img');
+  img.src = FP_IMAGE;
+  var pinsEl = panel.querySelector('.fp-plan-pins');
+
+  function syncPinsToImage() {
+    var bodyRect = panel.querySelector('.fp-panel-body').getBoundingClientRect();
+    var imageRect = img.getBoundingClientRect();
+    pinsEl.style.left = (imageRect.left - bodyRect.left) + 'px';
+    pinsEl.style.top = (imageRect.top - bodyRect.top) + 'px';
+    pinsEl.style.width = imageRect.width + 'px';
+    pinsEl.style.height = imageRect.height + 'px';
+  }
+  img.addEventListener('load', syncPinsToImage);
+  window.addEventListener('resize', syncPinsToImage);
+
+  FP_HOTSPOTS.forEach(function(h) {
+    var pin = document.createElement('div');
+    pin.className = 'fp-plan-pin';
+    pin.style.left = h.x + '%';
+    pin.style.top = h.y + '%';
+    var dot = document.createElement('span');
+    dot.className = 'fp-plan-pin-dot';
+    var s = h.size || 14;
+    dot.style.width = s + 'px';
+    dot.style.height = s + 'px';
+    dot.style.background = h.color || '#c8f135';
+    var tip = document.createElement('span');
+    tip.className = 'fp-plan-pin-tip';
+    tip.textContent = h.label || h.sceneKey;
+    pin.appendChild(dot);
+    pin.appendChild(tip);
+    pin.addEventListener('click', function() {
+      // Find scene button in sidebar and click it
+      var sceneEls = document.querySelectorAll('#sceneList .scene, .menu-item');
+      for (var i = 0; i < sceneEls.length; i++) {
+        var el = sceneEls[i];
+        if (el.getAttribute('data-id') === h.sceneKey || el.textContent.trim() === (h.label || h.sceneKey)) {
+          el.click();
+          panel.classList.remove('is-open');
+          return;
+        }
+      }
+      var target = document.querySelector('[data-id="' + h.sceneKey + '"]');
+      if (target) {
+        target.click();
+        panel.classList.remove('is-open');
+      }
+    });
+    pinsEl.appendChild(pin);
+  });
+
+  fab.addEventListener('click', function() {
+    panel.classList.toggle('is-open');
+    if (panel.classList.contains('is-open')) window.requestAnimationFrame(syncPinsToImage);
+  });
+  panel.querySelector('.fp-panel-close').addEventListener('click', function() { panel.classList.remove('is-open'); });
+
+  document.body.appendChild(fab);
+  document.body.appendChild(panel);
+  window.requestAnimationFrame(syncPinsToImage);
+})();`;
+}
+
 async function addExportSoundsToZip(zip, exportTargets) {
   await Promise.all(exportTargets.flatMap((target) => (target.hotspots || []).map(async (hotspot, index) => {
     const sound = hotspot.sound;
@@ -2200,7 +2614,7 @@ function patchExportSceneVideoIndexJs(indexJs) {
     activeSceneVideoButton.className = 'scene-video-reopen';
     activeSceneVideoButton.setAttribute('aria-label', 'Open scene video');
     activeSceneVideoButton.style.position = 'fixed';
-    activeSceneVideoButton.style.top = '134px';
+    activeSceneVideoButton.style.top = '198px';
     activeSceneVideoButton.style.left = 'auto';
     activeSceneVideoButton.style.right = '18px';
     activeSceneVideoButton.style.bottom = 'auto';
@@ -2263,7 +2677,7 @@ function patchExportAvatarStyleCss(styleCss) {
 .scene-video-reopen {
   position: fixed;
   z-index: 21;
-  top: 132px !important;
+  top: 196px !important;
   right: 18px;
   bottom: auto;
   width: 52px;
@@ -2289,7 +2703,7 @@ function patchExportAvatarStyleCss(styleCss) {
 }
 @media (max-width: 600px) {
   .scene-video-reopen {
-    top: 126px !important;
+    top: 190px !important;
     right: 10px;
     width: 46px;
     height: 46px;
@@ -2428,11 +2842,12 @@ async function openExportPreview() {
     });
     await addExportSoundsToZip(zip, exportTargets);
     zip.file('app-files/data.js', buildMarzipanoDataJs(exportTargets));
+    await addFloorPlanToZip(zip);
     zip.file('app-files/chat.js', buildExportChatScript(exportTargets[0]?.projectDetails || {}));
     await addBundledMarzipanoTemplate(zip);
     const templateIndexResponse = await fetch('/marzipano-template/app-files/index.html');
     const templateIndexHtml = templateIndexResponse.ok ? await templateIndexResponse.text() : buildStandaloneMarzipanoIndexHtml(exportTargets);
-    const updatedIndexHtml = buildMarzipanoIndexHtml(templateIndexHtml, exportTargets).replace('</body>', '<script src="chat.js"></script>\n</body>');
+    const updatedIndexHtml = buildMarzipanoIndexHtml(templateIndexHtml, exportTargets).replace('</body>', '<script src="chat.js"></script>' + (floorPlanFile ? '\n<script src="floorplan/floorplan.js"></script>' : '') + '\n</body>');
     zip.file('app-files/index.html', updatedIndexHtml);
     const templateIndexJsResponse = await fetch('/marzipano-template/app-files/index.js');
     if (templateIndexJsResponse.ok) {
@@ -2677,8 +3092,9 @@ async function exportScene() {
       }
       await addExportSoundsToZip(zip, exportTargets);
       zip.file('app-files/data.js', buildMarzipanoDataJs(exportTargets));
+    await addFloorPlanToZip(zip);
       const originalIndexHtml = await currentZipArchive.file('app-files/index.html').async('string');
-      const updatedIndexHtml = buildMarzipanoIndexHtml(originalIndexHtml, exportTargets).replace('</body>', '<script src="chat.js"></script>\n</body>');
+      const updatedIndexHtml = buildMarzipanoIndexHtml(originalIndexHtml, exportTargets).replace('</body>', '<script src="chat.js"></script>' + (floorPlanFile ? '\n<script src="floorplan/floorplan.js"></script>' : '') + '\n</body>');
       zip.file('app-files/index.html', updatedIndexHtml);
       zip.file('app-files/chat.js', buildExportChatScript());
       const originalIndexJsFile = currentZipArchive.file('app-files/index.js');
@@ -2776,9 +3192,10 @@ async function exportScene() {
     }
     await addExportSoundsToZip(zip, exportTargets);
     zip.file('app-files/data.js', buildMarzipanoDataJs(exportTargets));
+    await addFloorPlanToZip(zip);
     const templateIndexResponse = await fetch('/marzipano-template/app-files/index.html');
     const templateIndexHtml = templateIndexResponse.ok ? await templateIndexResponse.text() : buildStandaloneMarzipanoIndexHtml(exportTargets);
-    const updatedTemplateIndexHtml = buildMarzipanoIndexHtml(templateIndexHtml, exportTargets).replace('</body>', '<script src="chat.js"></script>\n</body>');
+    const updatedTemplateIndexHtml = buildMarzipanoIndexHtml(templateIndexHtml, exportTargets).replace('</body>', '<script src="chat.js"></script>' + (floorPlanFile ? '\n<script src="floorplan/floorplan.js"></script>' : '') + '\n</body>');
     zip.file('app-files/index.html', updatedTemplateIndexHtml);
     zip.file('app-files/chat.js', buildExportChatScript());
     const templateIndexJsResponse = await fetch('/marzipano-template/app-files/index.js');
@@ -2866,6 +3283,7 @@ sidebarAddSceneInput?.addEventListener('change', (event) => {
 document.querySelector('#export-btn').addEventListener('click', exportScene);
 document.querySelector('#preview-btn').addEventListener('click', openExportPreview);
 document.querySelector('#project-details-btn').addEventListener('click', editProjectDetails);
+document.querySelector('#floorplan-btn').addEventListener('click', openFloorPlanEditor);
 document.querySelector('#add-hotspot-btn').addEventListener('click', () => {
   hotspotPlacementMode = !hotspotPlacementMode;
   const btn = document.querySelector('#add-hotspot-btn');
@@ -2904,3 +3322,7 @@ window.addEventListener('beforeunload', (event) => {
 });
 
 export { app };
+
+
+
+
