@@ -227,6 +227,7 @@ function addZipSceneItems(file, targets) {
     titleInput.addEventListener('input', () => {
       const title = titleInput.value.trim() || target.label;
       sceneTitles.set(target.key, title);
+      updateFloorPlanHotspotLabels(target.key, title);
       titleInput.title = title;
     });
     item.querySelector('.scene-properties-btn').addEventListener('click', (event) => {
@@ -801,6 +802,7 @@ function addFiles(fileList, { autoLoad = true } = {}) {
     titleInput.addEventListener('input', () => {
       const title = titleInput.value.trim() || displayName;
       sceneTitles.set(displayName, title);
+      updateFloorPlanHotspotLabels(displayName, title);
       titleInput.title = title;
     });
     item.querySelector('.scene-properties-btn').addEventListener('click', (event) => {
@@ -1532,6 +1534,12 @@ function currentPanoramaKey() {
 
 function getSceneTitle(key, fallback) {
   return sceneTitles.get(key) || fallback || key;
+}
+
+function updateFloorPlanHotspotLabels(sceneKey, title) {
+  floorPlanHotspots.forEach((hotspot) => {
+    if (hotspot.sceneKey === sceneKey) hotspot.label = title;
+  });
 }
 
 // Looks up sceneVideos / sceneSounds by canonical key (no ext) OR full filename (with ext).
